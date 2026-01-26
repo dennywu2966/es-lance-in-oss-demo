@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat:*)",
+      "Bash(ss:*)",
+      "Bash(lsof:*)",
+      "Bash(python3:*)",
+      "Bash(sudo iptables:*)",
+      "Bash(pkill:*)"
+    ]
+  }
+}
