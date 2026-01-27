@@ -36,7 +36,7 @@
       "id": "US-006",
       "title": "Interactive Elasticsearch query editor",
       "priority": 6,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-007",

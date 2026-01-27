@@ -148,3 +148,47 @@
 - Expansion uses Framer Motion with `height: "auto"` and `opacity: 1` for smooth animations
 - Always verify the PRD requirements match what's actually in the code before assuming work needs to be done
 ---
+
+## 2025-01-27 - US-006
+- Implemented interactive Elasticsearch query editor with live execution
+- Created new API route `app/api/search/custom/route.ts` that:
+  - Accepts custom Elasticsearch query JSON
+  - Executes query against the configured ES index
+  - Returns full ES response with total hits and latency
+  - Validates JSON and provides clear error messages
+- Updated `components/live-demo.tsx` to include:
+  - Third search mode: "Custom Query" alongside kNN and Hybrid search
+  - Custom query editor with textarea for JSON input (resizable, 64 lines height)
+  - Three example query loaders: Match, kNN, and Bool queries
+  - JSON validation with client-side error checking before API call
+  - Custom query execution with dedicated purple/pink gradient button
+  - Results display showing full ES response JSON with copy button
+  - Formatted results list displaying hits with score, document ID, category, and text
+  - "Execute Another Query" button to reset and run new queries
+  - Error state display for invalid JSON or ES execution failures
+- UI features:
+  - Glass-morphism styling consistent with existing components
+  - Purple/pink gradient theme to distinguish from other search modes
+  - Responsive textarea with monospace font for JSON editing
+  - Example query buttons for quick starts (Match, kNN, Bool)
+  - Smooth animations using Framer Motion
+  - Loading state with spinner during query execution
+- Build succeeds with no TypeScript errors related to new code
+
+**Files changed:**
+- `app/api/search/custom/route.ts`: New API route for custom ES query execution
+- `components/live-demo.tsx`: Added custom query mode, editor UI, results display, and state management
+
+**Learnings for future iterations:**
+- Custom query editor provides flexibility for users to test advanced ES features not exposed in the UI
+- JSON validation on both client and server provides better UX with immediate feedback
+- Example queries help users understand the expected format and capabilities
+- Displaying full ES response JSON allows power users to debug and explore
+- The custom query mode uses `isCustomMode` state alongside `isHybridMode` to manage three different search interfaces
+- Custom queries bypass the profiling toggle and vector selection controls since users can add those directly in JSON
+- Results display handles both structured hits (with _source) and raw JSON response for flexibility
+- Purple/pink gradient theme (`from-purple-500 to-pink-500`) visually distinguishes custom query mode from kNN (primary blue) and hybrid (accent/primary gradient)
+- The textarea uses `resize-y` class to allow vertical resizing while preventing horizontal overflow
+- Example buttons use `Math.random()` to generate sample vectors for kNN queries
+- Error handling includes both JSON parse errors and ES execution errors with clear messages
+---
