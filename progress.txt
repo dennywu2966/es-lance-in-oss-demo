@@ -30,3 +30,31 @@
 - Error handling tracks failed documents but continues processing others.
 - Temp directories use `/tmp/lance-docs-${Date.now()}` pattern to avoid conflicts.
 ---
+
+## 2025-01-27 - US-002
+- Implemented document viewing functionality from Lance dataset stored in OSS
+- Created API route `app/api/vectors/documents/route.ts` that:
+  - Downloads Lance dataset from OSS (`lance-documents/dataset.lance`)
+  - Uses Python to read documents with columns: id, title, text, topic, created_at
+  - Returns documents as JSON with total count
+  - Cleans up temp directories after processing
+- Updated `components/vector-management.tsx` with:
+  - New "DOCUMENTS" button (emerald color) in dataset actions
+  - Document display panel showing all document fields
+  - Loading state with spinning refresh icon during fetch
+  - Documents displayed in scrollable container with max-height: 800px
+  - Each document shows: index badge, title, topic tag, created date, id, and full text
+  - Consistent glass-morphism styling matching existing UI
+
+**Files changed:**
+- `app/api/vectors/documents/route.ts`: New API route (POST endpoint)
+- `components/vector-management.tsx`: Added Document interface, documents state, loadDocuments function, DOCUMENTS button, and documents display section
+
+**Learnings for future iterations:**
+- Lance dataset reading pattern: download from OSS to /tmp, use Python to read with `lance.dataset()`, use `to_table()` with column filters to load specific fields, then cleanup
+- Documents are read with `limit` parameter (default 20) to avoid loading massive datasets
+- Python script must clear proxy environment variables before importing lance library
+- Document display uses similar UI pattern to sampled vectors but with different layout (header with metadata, body with text content)
+- Text content is displayed in a smaller font (text-sm) with leading-relaxed for better readability
+- Document cards have hover effect: hover:border-emerald-500/30 transition-colors
+---
