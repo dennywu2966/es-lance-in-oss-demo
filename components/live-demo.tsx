@@ -4,6 +4,13 @@ import { motion } from "framer-motion";
 import { Search, Zap, AlertCircle, RotateCw, CheckCircle2, ChevronDown, Activity, Eye, Database, Code, FileText, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { slideUp } from "@/lib/animations";
+import { WaterfallTimeline } from "./waterfall-timeline";
+
+interface TimingBreakdown {
+  phase: string;
+  duration: number;
+  startOffset: number;
+}
 
 interface SearchResult {
   id: string;
@@ -30,6 +37,7 @@ interface SearchResponse {
   vectorResults?: number;
   fusionResults?: number;
   queryText?: string;
+  timingBreakdown?: TimingBreakdown[];
 }
 
 interface BackfillResponse {
@@ -721,6 +729,14 @@ export function LiveDemo() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {/* Waterfall Timeline for Hybrid Search */}
+                {isHybridMode && response.timingBreakdown && response.timingBreakdown.length > 0 && (
+                  <WaterfallTimeline
+                    timingBreakdown={response.timingBreakdown}
+                    totalLatency={response.latency}
+                  />
                 )}
 
                 {/* Show ES Request Button */}

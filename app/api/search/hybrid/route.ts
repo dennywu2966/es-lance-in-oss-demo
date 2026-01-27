@@ -20,6 +20,12 @@ interface HybridSearchResult {
   matchType: 'text' | 'vector' | 'hybrid';
 }
 
+interface TimingBreakdown {
+  phase: string;
+  duration: number;
+  startOffset: number;
+}
+
 interface HybridSearchResponse {
   success: boolean;
   results?: HybridSearchResult[];
@@ -30,6 +36,7 @@ interface HybridSearchResponse {
   queryText?: string;
   error?: string;
   latency?: string;
+  timingBreakdown?: TimingBreakdown[];
 }
 
 // Generate embedding for query text using Jina API
@@ -216,6 +223,8 @@ function rrfFusion(
 
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
+  const timingBreakdown: TimingBreakdown[] = [];
+  let phaseStart = startTime;
 
   try {
     const body = await req.json() as HybridSearchRequest;
@@ -249,8 +258,15 @@ export async function POST(req: NextRequest) {
 
     // Generate embedding from query text if no query vector provided
     if (queryText && !queryVector) {
+      const embedStart = Date.now();
       try {
         finalQueryVector = await generateQueryEmbedding(queryText);
+        const embedDuration = Date.now() - embedStart;
+        timingBreakdown.push({
+          phase: 'Embedding Generation',
+          duration: embedDuration,
+          startOffset: embedStart - startTime,
+        });
       } catch (error: any) {
         return NextResponse.json(
           {
@@ -260,23 +276,50 @@ export async function POST(req: NextRequest) {
           { status: 500 }
         );
       }
+    } else if (queryVector) {
+      timingBreakdown.push({
+        phase: 'Embedding Generation',
+        duration: 0,
+        startOffset: 0,
+      });
     }
 
     // Perform text search if query text provided
     if (queryText) {
+      const textSearchStart = Date.now();
       const textSearch = await performTextSearch(ES_INDEX, queryText, k * 2);
+      const textSearchDuration = Date.now() - textSearchStart;
       textResults = textSearch.results;
+      timingBreakdown.push({
+        phase: 'Text Search (BM25)',
+        duration: textSearchDuration,
+        startOffset: textSearchStart - startTime,
+      });
     }
 
     // Perform vector search if query vector provided or generated
     if (finalQueryVector) {
+      const vectorSearchStart = Date.now();
       const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
+      const vectorSearchDuration = Date.now() - vectorSearchStart;
       vectorResults = vectorSearch.results;
+      timingBreakdown.push({
+        phase: 'Vector Search (kNN)',
+        duration: vectorSearchDuration,
+        startOffset: vectorSearchStart - startTime,
+      });
     }
 
     // Perform fusion if both searches were performed
     if (queryText && finalQueryVector) {
+      const fusionStart = Date.now();
       fusionResults = rrfFusion(textResults, vectorResults, k, textWeight, vectorWeight);
+      const fusionDuration = Date.now() - fusionStart;
+      timingBreakdown.push({
+        phase: 'RRF Fusion',
+        duration: fusionDuration,
+        startOffset: fusionStart - startTime,
+      });
     } else if (queryText) {
       fusionResults = textResults.slice(0, k);
     } else if (finalQueryVector) {
@@ -294,6 +337,7 @@ export async function POST(req: NextRequest) {
       queryText,
       queryVector: finalQueryVector,
       latency: `${latency}ms`,
+      timingBreakdown,
     });
   } catch (error: any) {
     console.error('Hybrid search error:', error);
