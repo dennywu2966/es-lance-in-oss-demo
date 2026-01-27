@@ -30,7 +30,7 @@
       "id": "US-005",
       "title": "View/hide full document details in search results",
       "priority": 5,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-006",

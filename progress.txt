@@ -92,3 +92,59 @@
 - Document mapping includes keyword subfields for exact matching (id, title.keyword)
 - Cosine similarity is the default for dense_vector - matches Lance embedding similarity metric
 ---
+
+## 2025-01-27 - US-004
+- Implemented automatic embedding generation for hybrid search fusion
+- Added `generateQueryEmbedding()` function in `app/api/search/hybrid/route.ts` that:
+  - Calls Jina API (jina-embeddings-v2-base-en model) to generate 768-dimension embeddings from query text
+  - Validates JINA_API_KEY environment variable before making requests
+  - Returns embedding as number[] for vector search
+- Updated hybrid search POST handler to:
+  - Automatically generate embeddings from query text when no query vector is provided
+  - Use generated embedding for vector kNN search while also performing BM25 text search
+  - Fuse results from both searches using RRF (Reciprocal Rank Fusion)
+  - Return generated query vector in response for transparency
+- Error handling for Jina API failures with descriptive error messages
+- Build succeeds with no TypeScript errors
+
+**Files changed:**
+- `app/api/search/hybrid/route.ts`: Added generateQueryEmbedding() function, updated POST handler to auto-generate embeddings
+
+**Learnings for future iterations:**
+- Hybrid search now works end-to-end with just query text input - no need to pre-generate embeddings
+- Jina API calls are synchronous and can add 200-500ms latency to hybrid search
+- The fusion approach combines BM25 (keyword matching) with semantic search (vector similarity) for better relevance
+- RRF scoring uses k=60 constant for both text and vector rankings: score = weight / (60 + rank)
+- When only query text is provided, both text and vector search are performed, then fused
+- When only query vector is provided, only vector search is performed (no text search possible)
+- Match type in results indicates whether document came from text search, vector search, or appeared in both (hybrid)
+---
+
+## 2025-01-27 - US-005
+- Verified existing view/hide document details functionality in search results
+- Feature was already implemented in the initial commit (b359703)
+- The `components/live-demo.tsx` component includes:
+  - `showOriginalDoc` state to track expanded documents (line 61)
+  - `toggleOriginalDoc()` function to handle expand/collapse (lines 162-172)
+  - "SHOW DOC" / "HIDE DOC" button in each search result (lines 641-656)
+  - Original Document Display section showing full details when expanded (lines 692-732)
+- Document details displayed include:
+  - Primary Key (_id)
+  - Category
+  - Full text content
+  - First 10 dimensions of the vector (if available)
+- UI uses Framer Motion for smooth expand/collapse animations
+- Build succeeds with no TypeScript errors
+- No code changes required - feature verification complete
+
+**Files changed:**
+- `prd.json`: Marked US-005 `passes: true`
+
+**Learnings for future iterations:**
+- Some features may be already implemented in the initial codebase - always verify existing functionality before starting implementation
+- The live-demo component uses two separate expansion states: `expandedResults` for vector data and `showOriginalDoc` for document text
+- Document expansion shows different content than vector expansion - documents show structured metadata while vectors show numerical data
+- The button toggles between two icons: Database (SHOW DOC) and FileText (HIDE DOC) to provide visual feedback
+- Expansion uses Framer Motion with `height: "auto"` and `opacity: 1` for smooth animations
+- Always verify the PRD requirements match what's actually in the code before assuming work needs to be done
+---
