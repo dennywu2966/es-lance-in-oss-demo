@@ -12,7 +12,7 @@
       "id": "US-002",
       "title": "View full document content from Lance dataset",
       "priority": 2,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-003",
