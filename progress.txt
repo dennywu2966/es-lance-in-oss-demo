@@ -1,0 +1,32 @@
+## Codebase Patterns
+
+- **Python script pattern in Node.js**: Use heredoc syntax (`python3 - <<'PYEOF'\\n${script}\\nPYEOF`) to execute Python code from TypeScript files. Remember to clear proxy environment variables before importing Python libraries.
+- **OSS credentials management**: OSS credentials are read from environment variables (OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_BUCKET, OSS_REGION). Never hardcode credentials in frontend code.
+- **API route structure**: All API routes use `app/api/[resource]/[action]/route.ts` pattern with POST handlers that return JSON responses with `{ success: boolean, ... }` structure.
+- **Error handling**: Always wrap Python execution in try-catch blocks with cleanup of temp directories using `fs.rm(tempDir, { recursive: true, force: true })`.
+
+## 2025-01-27 12:40 - US-001
+- Implemented document generation with Jina embeddings (jina-embeddings-v2-base-en model, 768 dimensions)
+- Created 20 hardcoded fake documents covering tech topics: AI, databases, search engines, cloud computing, ML, distributed systems, DevOps, data engineering, software architecture, software development
+- Added `generateDocumentsWithEmbeddings()` function in `lib/oss-client.ts` that:
+  - Calls Jina API for each document text sequentially
+  - Generates Lance dataset with schema: id, title, text, topic, created_at, vector
+  - Creates IVF_PQ vector index with num_partitions = max(2, len // 5) and num_sub_vectors = min(dims // 8, 64)
+  - Uploads to OSS at `lance-documents/dataset.lance`
+  - Returns success status, document count, and OSS path
+- Created API route `app/api/vectors/documents/generate/route.ts` (POST endpoint)
+- Updated `.env.example` to include JINA_API_KEY
+
+**Files changed:**
+- `lib/oss-client.ts`: Added FakeDocument interface, FAKE_DOCUMENTS constant (20 docs), generateDocumentsWithEmbeddings() function
+- `app/api/vectors/documents/generate/route.ts`: New API route
+- `.env.example`: Added JINA_API_KEY configuration
+
+**Learnings for future iterations:**
+- The Jina API is called sequentially (20 requests). For production, consider batching or parallel requests with rate limiting.
+- Lance dataset schema uses `pa.string()` for Java compatibility (avoid `pa.utf8()`).
+- Python script must clear proxy environment variables (`http_proxy`, `https_proxy`, etc.) before importing libraries to avoid import errors.
+- IVF_PQ index parameters are calculated based on dataset size: num_partitions = max(2, min(n // 5, 8)) for small datasets (20 docs = 4 partitions).
+- Error handling tracks failed documents but continues processing others.
+- Temp directories use `/tmp/lance-docs-${Date.now()}` pattern to avoid conflicts.
+---
