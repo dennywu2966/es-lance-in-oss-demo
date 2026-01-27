@@ -20,6 +20,7 @@ import {
   FileText,
   Clock,
   Tag,
+  Upload,
 } from "lucide-react";
 import { slideUp, staggerContainer } from "@/lib/animations";
 
@@ -83,6 +84,9 @@ export function VectorManagement() {
   // Documents state
   const [documents, setDocuments] = useState<Document[] | null>(null);
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+
+  // Backfill state
+  const [isBackfilling, setIsBackfilling] = useState(false);
 
   // Generation parameters
   const [vectors, setVectors] = useState(100);
@@ -265,6 +269,32 @@ export function VectorManagement() {
       setError(err.message);
     } finally {
       setIsLoadingDocuments(false);
+    }
+  };
+
+  const backfillToElasticsearch = async () => {
+    setIsBackfilling(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const res = await fetch("/api/vectors/backfill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setSuccess(data.message || `Backfilled ${data.indexedDocuments} documents to Elasticsearch in ${data.duration}`);
+      } else {
+        setError(data.error || "Backfill failed");
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsBackfilling(false);
     }
   };
 
@@ -661,6 +691,18 @@ export function VectorManagement() {
                                   <FileText className="w-3 h-3" />
                                 )}
                                 DOCUMENTS
+                              </button>
+                              <button
+                                onClick={backfillToElasticsearch}
+                                disabled={isBackfilling || isGenerating || isSampling || isLoadingDocuments}
+                                className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-sm text-xs font-mono text-blue-400 flex items-center gap-2 transition-colors disabled:opacity-50"
+                              >
+                                {isBackfilling ? (
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Upload className="w-3 h-3" />
+                                )}
+                                BACKFILL ES
                               </button>
                               <button
                                 onClick={() => deleteDataset(dataset.name)}

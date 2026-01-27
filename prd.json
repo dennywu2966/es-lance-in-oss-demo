@@ -18,7 +18,7 @@
       "id": "US-003",
       "title": "Backfill documents to Elasticsearch",
       "priority": 3,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-004",

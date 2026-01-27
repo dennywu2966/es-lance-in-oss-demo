@@ -4,6 +4,8 @@
 - **OSS credentials management**: OSS credentials are read from environment variables (OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_BUCKET, OSS_REGION). Never hardcode credentials in frontend code.
 - **API route structure**: All API routes use `app/api/[resource]/[action]/route.ts` pattern with POST handlers that return JSON responses with `{ success: boolean, ... }` structure.
 - **Error handling**: Always wrap Python execution in try-catch blocks with cleanup of temp directories using `fs.rm(tempDir, { recursive: true, force: true })`.
+- **Elasticsearch integration**: ES uses Basic auth (base64-encoded credentials), bulk API expects NDJSON format (newline-delimited JSON), dense_vector field requires exact dimensions, cosine similarity is default metric.
+- **Lance dataset operations**: Extract vectors with `.as_py().tolist()` pattern, use `dataset.to_table(columns=[...])` for selective loading, always cleanup temp directories after operations.
 
 ## 2025-01-27 12:40 - US-001
 - Implemented document generation with Jina embeddings (jina-embeddings-v2-base-en model, 768 dimensions)
@@ -57,4 +59,36 @@
 - Document display uses similar UI pattern to sampled vectors but with different layout (header with metadata, body with text content)
 - Text content is displayed in a smaller font (text-sm) with leading-relaxed for better readability
 - Document cards have hover effect: hover:border-emerald-500/30 transition-colors
+---
+
+## 2025-01-27 - US-003
+- Implemented Elasticsearch backfill functionality for Lance documents
+- Updated `app/api/vectors/backfill/route.ts` to:
+  - Read documents with embeddings from Lance dataset in OSS (lance-documents/dataset.lance)
+  - Create Elasticsearch index with proper mapping for dense_vector field (768 dims, cosine similarity)
+  - Index documents in batches (20 docs per batch) using ES bulk API
+  - Return detailed response: indexed count, total count, vector dimensions, duration
+  - Support optional index creation (default: true)
+- Updated `components/vector-management.tsx` to:
+  - Add `isBackfilling` state variable
+  - Add `backfillToElasticsearch()` function to call the backfill API
+  - Add Upload icon import from lucide-react
+  - Add "BACKFILL ES" button (blue color) between DOCUMENTS and DELETE buttons
+  - Button shows loading spinner during backfill operation
+  - Button disabled during other operations (generating, sampling, loading documents)
+
+**Files changed:**
+- `app/api/vectors/backfill/route.ts`: Complete rewrite for document backfill (was for old vector datasets)
+- `components/vector-management.tsx`: Added backfill state, function, and button
+
+**Learnings for future iterations:**
+- Elasticsearch dense_vector field requires exact dimensions specification (768 for Jina embeddings)
+- ES bulk API expects newline-delimited JSON (NDJSON) format, not regular JSON array
+- ES index creation uses 400 response when index already exists - this is expected behavior
+- Lance dataset vector extraction: use `.as_py()` method then `.tolist()` to convert PyArrow data to Python list
+- Backfill pattern: download from OSS → read with Python → index to ES → cleanup temp directory
+- Batch size of 20 documents keeps bulk requests under ES recommended 10MB limit
+- ES authentication uses Basic auth with base64-encoded credentials
+- Document mapping includes keyword subfields for exact matching (id, title.keyword)
+- Cosine similarity is the default for dense_vector - matches Lance embedding similarity metric
 ---

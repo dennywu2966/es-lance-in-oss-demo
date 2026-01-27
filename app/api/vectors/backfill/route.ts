@@ -1,156 +1,280 @@
 import { NextRequest, NextResponse } from "next/server";
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs/promises";
+import OSS from "ali-oss";
+
+const execAsync = promisify(exec);
+
+// OSS Configuration
+const OSS_CONFIG = {
+  region: process.env.OSS_REGION || "oss-ap-southeast-1",
+  accessKeyId: process.env.OSS_ACCESS_KEY_ID || "",
+  accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || "",
+  bucket: process.env.OSS_BUCKET || "denny-test-lance",
+};
+
+const client = new OSS(OSS_CONFIG);
 
 interface BackfillRequest {
-  dataset: string;
-  esEndpoint?: string;
   esIndex?: string;
+  createIndex?: boolean;
 }
 
 interface BackfillResponse {
   success: boolean;
-  indexed?: number;
-  failed?: number;
+  indexedDocuments?: number;
+  totalDocuments?: number;
+  vectorDimensions?: number;
+  duration?: string;
+  esIndex?: string;
+  message?: string;
   error?: string;
-  details?: string;
 }
 
-// Helper to fetch dataset metadata and sample
-async function getDatasetSample(dataset: string): Promise<{ _id: string[]; category: string[]; text: string[] }> {
-  const { exec } = require('child_process');
-  const util = require('util');
-  const execAsync = util.promisify(exec);
-
-  const tempDir = `/tmp/lance-backfill-${Date.now()}`;
-
-  const pythonScript = `
-import os
-import sys
-
-# Clear proxy settings
-for var in list(os.environ.keys()):
-    if 'proxy' in var.lower():
-        del os.environ[var]
-
-import oss2
-import lance
-
-# OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
-
-temp_dir = "${tempDir}"
-dataset_name = "${dataset}"
-oss_prefix = f"datasets/{dataset_name}/"
-
-# Download dataset from OSS
-os.makedirs(temp_dir, exist_ok=True)
-result = bucket.list_objects(prefix=oss_prefix)
-for obj in result.object_list:
-    if not obj.key.endswith('/'):
-        relative_path = obj.key.replace(oss_prefix, '')
-        local_file = os.path.join(temp_dir, relative_path)
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        object_data = bucket.get_object(obj.key)
-        with open(local_file, 'wb') as f:
-            f.write(object_data.read())
-
-dataset = lance.dataset(temp_dir)
-table = dataset.to_table()
-data = table.to_pydict()
-
-# Sample first 100 to avoid timeout
-sample_size = min(100, len(data['_id']))
-output = {
-    '_id': [data['_id'][i].as_py() if hasattr(data['_id'][i], 'as_py') else data['_id'][i] for i in range(sample_size)],
-    'category': [data['category'][i].as_py() if hasattr(data['category'][i], 'as_py') else data['category'][i] for i in range(sample_size)],
-    'text': [data['text'][i].as_py() if hasattr(data['text'][i], 'as_py') else data['text'][i] for i in range(sample_size)]
+interface DocumentWithVector {
+  id: string;
+  title: string;
+  text: string;
+  topic: string;
+  created_at: string;
+  vector: number[];
 }
 
-import json
-import shutil
-shutil.rmtree(temp_dir, ignore_errors=True)
-print(json.dumps(output))
-`;
+// Create Elasticsearch index with proper mapping for dense_vector
+async function createESIndex(esIndex: string): Promise<void> {
+  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
 
-  const { stdout } = await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
+  const mapping = {
+    mappings: {
+      properties: {
+        id: { type: "keyword" },
+        title: {
+          type: "text",
+          fields: {
+            keyword: { type: "keyword" }
+          }
+        },
+        text: { type: "text" },
+        topic: { type: "keyword" },
+        created_at: { type: "date" },
+        embedding: {
+          type: "dense_vector",
+          dims: 768,
+          index: true,
+          similarity: "cosine"
+        }
+      }
+    }
+  };
 
-  return JSON.parse(stdout.trim());
+  const response = await fetch(`${ES_HOST}/${esIndex}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
+    },
+    body: JSON.stringify(mapping)
+  });
+
+  if (!response.ok && response.status !== 400) {
+    // 400 might mean index already exists, which is ok
+    throw new Error(`Failed to create ES index: ${response.status} ${response.statusText}`);
+  }
 }
 
-export async function POST(req: NextRequest) {
+// Index a batch of documents into Elasticsearch
+async function indexDocuments(esIndex: string, documents: DocumentWithVector[]): Promise<void> {
+  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+
+  // Prepare bulk operations
+  const bulkBody: any[] = [];
+
+  for (const doc of documents) {
+    bulkBody.push(
+      { index: { _index: esIndex, _id: doc.id } },
+      {
+        id: doc.id,
+        title: doc.title,
+        text: doc.text,
+        topic: doc.topic,
+        created_at: doc.created_at,
+        embedding: doc.vector
+      }
+    );
+  }
+
+  // Execute bulk request
+  const response = await fetch(`${ES_HOST}/_bulk`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
+    },
+    body: bulkBody.map((line) => JSON.stringify(line)).join('\n') + '\n'
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to index documents: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (data.errors) {
+    console.error('Bulk indexing had errors:', data.items);
+  }
+}
+
+export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+
   try {
-    const body = await req.json() as BackfillRequest;
-    const { dataset } = body;
+    const body = await request.json() as BackfillRequest;
+    const esIndex = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
+    const shouldCreateIndex = body.createIndex !== false; // Default to true
 
-    if (!dataset) {
-      return NextResponse.json(
-        { success: false, error: "Dataset name is required" },
-        { status: 400 }
-      );
+    const tempDir = `/tmp/lance-backfill-${Date.now()}`;
+    const datasetPath = "lance-documents/dataset.lance";
+    const localPath = `${tempDir}/dataset.lance`;
+
+    // Create temp directory
+    await fs.mkdir(tempDir, { recursive: true });
+
+    // Download dataset from OSS
+    const result = await client.list({
+      prefix: datasetPath,
+    });
+
+    if (!result.objects || result.objects.length === 0) {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      return NextResponse.json({
+        success: false,
+        error: "No documents dataset found in OSS. Please generate documents first.",
+      });
     }
 
-    const ES_HOST = body.esEndpoint || process.env.ES_HOST || 'http://localhost:9200';
-    const ES_INDEX = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
-    const ES_AUTH = Buffer.from('elastic-admin:elastic-password').toString('base64');
+    // Download all files
+    for (const obj of result.objects) {
+      const relativePath = obj.name.replace(`${datasetPath}/`, "");
+      const localFilePath = `${tempDir}/${relativePath}`;
 
-    // Fetch dataset sample
-    const sample = await getDatasetSample(dataset);
+      // Ensure directory exists
+      const dir = localFilePath.substring(0, localFilePath.lastIndexOf("/"));
+      await fs.mkdir(dir, { recursive: true });
 
-    let indexed = 0;
-    let failed = 0;
+      await client.get(obj.name, localFilePath);
+    }
 
-    // Index documents in batches
-    const batchSize = 10;
-    for (let i = 0; i < sample._id.length; i += batchSize) {
-      const batch = sample._id.slice(i, i + batchSize);
+    // Read documents with vectors using Python
+    const pythonScript = `
+import os
+import sys
+os.environ.pop('http_proxy', None)
+os.environ.pop('https_proxy', None)
+os.environ.pop('all_proxy', None)
+os.environ.pop('ALL_PROXY', None)
 
-      const bulkBody = batch.flatMap((id, idx) => {
-        const category = sample.category[i + idx];
-        const text = sample.text[i + idx];
+import lance
+import json
 
-        return [
-          { index: { _index: ES_INDEX, _id: id } },
-          { document: { id, category, text, embedding: { is_indexing: true } } },
-        ];
+dataset_path = "${localPath}"
+
+# Open dataset
+dataset = lance.dataset(dataset_path)
+
+# Get total count
+total = dataset.count_rows()
+
+# Load all documents with vectors
+table = dataset.to_table()
+
+# Convert to list of dicts
+data = table.to_pydict()
+
+result = []
+for i in range(len(data['id'])):
+    # Extract vector data
+    vec_data = data['vector'][i]
+    if hasattr(vec_data, 'as_py'):
+        vec_data = vec_data.as_py()
+    vector_list = vec_data.tolist() if hasattr(vec_data, 'tolist') else list(vec_data)
+
+    result.append({
+        'id': data['id'][i],
+        'title': data['title'][i],
+        'text': data['text'][i],
+        'topic': data['topic'][i],
+        'created_at': data['created_at'][i],
+        'vector': vector_list
+    })
+
+# Output as JSON
+print(json.dumps({'documents': result, 'total': total}))
+`;
+
+    const { stdout } = await execAsync(
+      `python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`
+    );
+
+    const parsedOutput = JSON.parse(stdout.trim());
+    const documents: DocumentWithVector[] = parsedOutput.documents;
+
+    if (documents.length === 0) {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      return NextResponse.json({
+        success: false,
+        error: "No documents found in dataset",
       });
+    }
 
-      const response = await fetch(`${ES_HOST}/_bulk`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-ndjson',
-          'Authorization': `Basic ${ES_AUTH}`,
-        },
-        body: bulkBody.map((line) => JSON.stringify(line)).join('\n') + '\n',
-      });
+    // Cleanup temp directory
+    await fs.rm(tempDir, { recursive: true, force: true });
 
-      if (response.ok) {
-        const result = await response.json();
-        if (result.errors) {
-          failed += batch.length;
-        } else {
-          indexed += batch.length;
-        }
-      } else {
-        failed += batch.length;
+    // Create ES index if requested
+    if (shouldCreateIndex) {
+      try {
+        await createESIndex(esIndex);
+      } catch (error: any) {
+        // Index might already exist, log but continue
+        console.warn('Index creation warning:', error.message);
       }
     }
 
+    // Index documents in batches (ES recommends bulk size < 10MB)
+    const batchSize = 20; // 20 docs at a time
+    let indexedCount = 0;
+
+    for (let i = 0; i < documents.length; i += batchSize) {
+      const batch = documents.slice(i, i + batchSize);
+      await indexDocuments(esIndex, batch);
+      indexedCount += batch.length;
+    }
+
+    const duration = Date.now() - startTime;
+
     return NextResponse.json({
       success: true,
-      indexed,
-      failed,
-      details: `Backfilled ${indexed} documents from dataset "${dataset}" to index "${ES_INDEX}"`,
+      esIndex,
+      totalDocuments: documents.length,
+      indexedDocuments: indexedCount,
+      duration: `${duration}ms`,
+      vectorDimensions: documents[0]?.vector.length || 0,
+      message: `Successfully backfilled ${indexedCount} documents to Elasticsearch index "${esIndex}"`,
     });
   } catch (error: any) {
-    console.error('Backfill error:', error);
+    console.error("Backfill failed:", error);
 
-    return NextResponse.json(
-      {
-        success: false,
-        error: error.message || 'Backfill failed',
-        details: error.stack,
-      },
-      { status: 500 }
-    );
+    // Cleanup on error
+    try {
+      await fs.rm(`/tmp/lance-backfill-${Date.now()}`, {
+        recursive: true,
+        force: true,
+      });
+    } catch {}
+
+    return NextResponse.json({
+      success: false,
+      error: error.message || "Backfill failed",
+    }, { status: 500 });
   }
 }
