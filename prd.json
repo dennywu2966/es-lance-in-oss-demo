@@ -24,7 +24,7 @@
       "id": "US-004",
       "title": "Fusion search with query input",
       "priority": 4,
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-005",

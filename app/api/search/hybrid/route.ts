@@ -32,6 +32,40 @@ interface HybridSearchResponse {
   latency?: string;
 }
 
+// Generate embedding for query text using Jina API
+async function generateQueryEmbedding(queryText: string): Promise<number[]> {
+  const JINA_API_KEY = process.env.JINA_API_KEY;
+
+  if (!JINA_API_KEY) {
+    throw new Error('JINA_API_KEY environment variable is not set');
+  }
+
+  const response = await fetch('https://api.jina.ai/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${JINA_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'jina-embeddings-v2-base-en',
+      input: queryText,
+      encoding_type: 'float',
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Jina API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (data.data && data.data[0] && data.data[0].embedding) {
+    return data.data[0].embedding;
+  } else {
+    throw new Error('Invalid response format from Jina API');
+  }
+}
+
 // Perform BM25 text search
 async function performTextSearch(
   index: string,
@@ -197,7 +231,7 @@ export async function POST(req: NextRequest) {
 
     const ES_INDEX = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
 
-    // If no query vector provided, we can't do vector search
+    // If no query vector and no query text, we can't search
     if (!queryVector && !queryText) {
       return NextResponse.json(
         {
@@ -211,6 +245,22 @@ export async function POST(req: NextRequest) {
     let textResults: HybridSearchResult[] = [];
     let vectorResults: HybridSearchResult[] = [];
     let fusionResults: HybridSearchResult[] = [];
+    let finalQueryVector = queryVector;
+
+    // Generate embedding from query text if no query vector provided
+    if (queryText && !queryVector) {
+      try {
+        finalQueryVector = await generateQueryEmbedding(queryText);
+      } catch (error: any) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Failed to generate embedding for query text: ${error.message}`,
+          },
+          { status: 500 }
+        );
+      }
+    }
 
     // Perform text search if query text provided
     if (queryText) {
@@ -218,18 +268,18 @@ export async function POST(req: NextRequest) {
       textResults = textSearch.results;
     }
 
-    // Perform vector search if query vector provided
-    if (queryVector) {
-      const vectorSearch = await performVectorSearch(ES_INDEX, queryVector, k, numCandidates);
+    // Perform vector search if query vector provided or generated
+    if (finalQueryVector) {
+      const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
       vectorResults = vectorSearch.results;
     }
 
     // Perform fusion if both searches were performed
-    if (queryText && queryVector) {
+    if (queryText && finalQueryVector) {
       fusionResults = rrfFusion(textResults, vectorResults, k, textWeight, vectorWeight);
     } else if (queryText) {
       fusionResults = textResults.slice(0, k);
-    } else if (queryVector) {
+    } else if (finalQueryVector) {
       fusionResults = vectorResults.slice(0, k);
     }
 
@@ -242,7 +292,7 @@ export async function POST(req: NextRequest) {
       vectorResults: vectorResults.length,
       fusionResults: fusionResults.length,
       queryText,
-      queryVector,
+      queryVector: finalQueryVector,
       latency: `${latency}ms`,
     });
   } catch (error: any) {
