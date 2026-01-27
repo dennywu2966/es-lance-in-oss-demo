@@ -84,7 +84,7 @@ export function ValidationTimeline() {
                       variants={expandCollapse}
                       className="overflow-hidden"
                     >
-                      <div className="mt-3 ml-4 p-4 rounded-lg bg-white/5 border-l-2 border-primary">
+                      <div className="mt-3 ml-4 p-4 glass-card glass-card-hover">
                         <ul className="space-y-2">
                           {phase.details.map((detail, detailIndex) => (
                             <li key={detailIndex} className="flex items-start gap-2 text-gray-300">
