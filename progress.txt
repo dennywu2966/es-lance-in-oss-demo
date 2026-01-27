@@ -6,6 +6,8 @@
 - **Error handling**: Always wrap Python execution in try-catch blocks with cleanup of temp directories using `fs.rm(tempDir, { recursive: true, force: true })`.
 - **Elasticsearch integration**: ES uses Basic auth (base64-encoded credentials), bulk API expects NDJSON format (newline-delimited JSON), dense_vector field requires exact dimensions, cosine similarity is default metric.
 - **Lance dataset operations**: Extract vectors with `.as_py().tolist()` pattern, use `dataset.to_table(columns=[...])` for selective loading, always cleanup temp directories after operations.
+- **Performance tracking**: Use `Date.now()` before and after each phase to build timing breakdowns. Store timing as `{ phase: string, duration: number, startOffset: number }` array for waterfall visualization.
+- **Component composition**: Create reusable visualization components (like WaterfallTimeline) that accept data props and handle their own animations and styling with Framer Motion.
 
 ## 2025-01-27 12:40 - US-001
 - Implemented document generation with Jina embeddings (jina-embeddings-v2-base-en model, 768 dimensions)
@@ -191,4 +193,43 @@
 - The textarea uses `resize-y` class to allow vertical resizing while preventing horizontal overflow
 - Example buttons use `Math.random()` to generate sample vectors for kNN queries
 - Error handling includes both JSON parse errors and ES execution errors with clear messages
+---
+
+## 2025-01-27 - US-007
+- Implemented waterfall timeline visualization for hybrid search performance
+- Updated hybrid search API (`app/api/search/hybrid/route.ts`) to track and return detailed timing breakdowns for each search phase
+- Created new `components/waterfall-timeline.tsx` component with:
+  - Visual waterfall chart showing phase execution timeline with start offsets and durations
+  - Color-coded gradient bars for each phase (Embedding, Text Search, Vector Search, Fusion)
+  - Time axis with 5 reference points (0ms, 25%, 50%, 75%, 100% of total duration)
+  - Phase icons and labels with duration display
+  - Legend explaining color coding
+  - Performance insights section with optimization recommendations
+  - Smooth Framer Motion animations on load
+- Updated `components/live-demo.tsx` to:
+  - Import and integrate WaterfallTimeline component
+  - Display waterfall visualization for hybrid search results only
+  - Show timing breakdown below existing profiling section
+- Timing breakdown tracks:
+  - Embedding Generation: Jina API call duration
+  - Text Search (BM25): Elasticsearch text query duration
+  - Vector Search (kNN): Elasticsearch kNN query duration
+  - RRF Fusion: Result fusion and ranking duration
+- Build succeeds with no TypeScript errors
+
+**Files changed:**
+- `app/api/search/hybrid/route.ts`: Added TimingBreakdown interface, phase tracking in POST handler
+- `components/waterfall-timeline.tsx`: New component with waterfall timeline visualization
+- `components/live-demo.tsx`: Added WaterfallTimeline import and integration
+
+**Learnings for future iterations:**
+- Waterfall visualization helps identify parallel execution opportunities (text and vector searches could run concurrently)
+- The timing breakdown shows that embedding generation is often the bottleneck (~200-500ms for Jina API)
+- Total latency includes all phases sequentially - parallelizing text/vector search would reduce total time
+- The waterfall chart uses percentage-based positioning to handle varying total durations gracefully
+- Phase colors match the search type (purple for embedding, blue for text, emerald for vector, pink for fusion)
+- Performance insights are dynamically generated based on timing thresholds (e.g., embedding > 200ms triggers caching recommendation)
+- The visualization only appears for hybrid searches where all timing data is available
+- Start offset tracking reveals the sequential nature of the current implementation
+- Glass-morphism styling maintains consistency with other UI components
 ---
