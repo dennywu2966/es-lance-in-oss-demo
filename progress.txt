@@ -8,6 +8,7 @@
 - **Lance dataset operations**: Extract vectors with `.as_py().tolist()` pattern, use `dataset.to_table(columns=[...])` for selective loading, always cleanup temp directories after operations.
 - **Performance tracking**: Use `Date.now()` before and after each phase to build timing breakdowns. Store timing as `{ phase: string, duration: number, startOffset: number }` array for waterfall visualization.
 - **Component composition**: Create reusable visualization components (like WaterfallTimeline) that accept data props and handle their own animations and styling with Framer Motion.
+- **Glass-morphism UI pattern**: Always use `glass-card` class for consistent glass-morphism styling instead of inline `bg-white/5 backdrop-blur-sm border border-white/10`. Use semantic variants (`glass-card-error`, `glass-card-success`, `glass-card-warning`, `glass-card-info`) for colored states, and `glass-card-hover` for interactive elements.
 
 ## 2025-01-27 12:40 - US-001
 - Implemented document generation with Jina embeddings (jina-embeddings-v2-base-en model, 768 dimensions)
