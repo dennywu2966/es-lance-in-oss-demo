@@ -48,7 +48,7 @@
       "id": "US-008",
       "title": "Consistent glass-morphism UI styling",
       "priority": 8,
-      "passes": false
+      "passes": true
     }
   ]
 }
