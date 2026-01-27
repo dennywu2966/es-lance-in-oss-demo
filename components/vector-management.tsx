@@ -17,6 +17,9 @@ import {
   Download,
   Eye,
   X,
+  FileText,
+  Clock,
+  Tag,
 } from "lucide-react";
 import { slideUp, staggerContainer } from "@/lib/animations";
 
@@ -50,6 +53,21 @@ interface SampleResponse {
   error?: string;
 }
 
+interface Document {
+  id: string;
+  title: string;
+  text: string;
+  topic: string;
+  created_at: string;
+}
+
+interface DocumentsResponse {
+  success: boolean;
+  documents?: Document[];
+  total?: number;
+  error?: string;
+}
+
 export function VectorManagement() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -61,6 +79,10 @@ export function VectorManagement() {
   // Sampled vectors state
   const [sampledVectors, setSampledVectors] = useState<SampledVector[] | null>(null);
   const [sampledDataset, setSampledDataset] = useState<string | null>(null);
+
+  // Documents state
+  const [documents, setDocuments] = useState<Document[] | null>(null);
+  const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
 
   // Generation parameters
   const [vectors, setVectors] = useState(100);
@@ -216,6 +238,33 @@ export function VectorManagement() {
       setError(err.message);
     } finally {
       setIsSampling(false);
+    }
+  };
+
+  const loadDocuments = async () => {
+    setIsLoadingDocuments(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const res = await fetch("/api/vectors/documents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 20 }),
+      });
+
+      const data: DocumentsResponse = await res.json();
+
+      if (data.success && data.documents) {
+        setDocuments(data.documents);
+        setSuccess(`Loaded ${data.documents.length} documents from ${data.total} total`);
+      } else {
+        setError(data.error || "Failed to load documents");
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoadingDocuments(false);
     }
   };
 
@@ -602,6 +651,18 @@ export function VectorManagement() {
                                 SAMPLE
                               </button>
                               <button
+                                onClick={loadDocuments}
+                                disabled={isLoadingDocuments || isGenerating || isSampling}
+                                className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-sm text-xs font-mono text-emerald-400 flex items-center gap-2 transition-colors disabled:opacity-50"
+                              >
+                                {isLoadingDocuments ? (
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <FileText className="w-3 h-3" />
+                                )}
+                                DOCUMENTS
+                              </button>
+                              <button
                                 onClick={() => deleteDataset(dataset.name)}
                                 disabled={isGenerating || isSampling}
                                 className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-sm text-xs font-mono text-red-400 flex items-center gap-2 transition-colors disabled:opacity-50"
@@ -688,6 +749,81 @@ export function VectorManagement() {
                                 </span>
                               )}
                             </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Documents Display */}
+          <AnimatePresence>
+            {documents && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                variants={slideUp}
+                className="relative"
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-2xl font-bold font-mono text-white">
+                      <span className="text-emerald-400">/</span> DOCUMENTS
+                    </h3>
+                    <span className="px-2 py-1 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-mono rounded">
+                      {documents.length} docs
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setDocuments(null)}
+                    className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-sm text-sm font-mono text-gray-300 flex items-center gap-2 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                    CLOSE
+                  </button>
+                </div>
+
+                {/* Documents Grid */}
+                <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/50 rounded-sm p-6">
+                  <div className="space-y-4 max-h-[800px] overflow-y-auto">
+                    {documents.map((doc, index) => (
+                      <div key={doc.id} className="border border-gray-700 rounded-sm overflow-hidden hover:border-emerald-500/30 transition-colors">
+                        {/* Document Header */}
+                        <div className="flex items-center justify-between px-4 py-3 bg-black/30 border-b border-gray-700">
+                          <div className="flex items-center gap-3 flex-1 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center flex-shrink-0">
+                              <span className="text-emerald-400 font-bold text-sm">{index + 1}</span>
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-white font-mono text-sm font-semibold truncate">{doc.title}</p>
+                              <div className="flex items-center gap-3 mt-1">
+                                <span className="text-gray-500 text-xs font-mono flex items-center gap-1">
+                                  <Tag className="w-3 h-3" />
+                                  {doc.topic}
+                                </span>
+                                <span className="text-gray-600 text-xs font-mono flex items-center gap-1">
+                                  <Clock className="w-3 h-3" />
+                                  {new Date(doc.created_at).toLocaleDateString()}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <span className="px-2 py-1 bg-gray-800 border border-gray-600 text-gray-400 text-xs font-mono rounded ml-2 flex-shrink-0">
+                            {doc.id}
+                          </span>
+                        </div>
+
+                        {/* Document Text */}
+                        <div className="p-4 bg-black/20">
+                          <div className="bg-black/50 rounded-sm p-4">
+                            <p className="text-gray-300 text-sm leading-relaxed font-mono">
+                              {doc.text}
+                            </p>
                           </div>
                         </div>
                       </div>
