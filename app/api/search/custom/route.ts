@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     }
 
     const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-    const ES_AUTH = Buffer.from('elastic-admin:elastic-password').toString('base64');
+    const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
     const ES_INDEX = esIndex || process.env.ES_INDEX || 'lance-validation-test';
 
     // Execute the custom query against Elasticsearch

@@ -17,6 +17,7 @@ const OSS_CONFIG = {
 const client = new OSS(OSS_CONFIG);
 
 interface BackfillRequest {
+  dataset?: string;
   esIndex?: string;
   createIndex?: boolean;
 }
@@ -32,39 +33,55 @@ interface BackfillResponse {
   error?: string;
 }
 
-interface DocumentWithVector {
+interface DocumentMetadata {
+  _id: string;
   id: string;
   title: string;
   text: string;
   topic: string;
-  created_at: string;
-  vector: number[];
+  category: string;
 }
 
-// Create Elasticsearch index with proper mapping for dense_vector
-async function createESIndex(esIndex: string): Promise<void> {
+// Create Elasticsearch index with proper mapping for metadata + lance_vector field
+async function createESIndex(esIndex: string, datasetUri?: string): Promise<void> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+
+  const properties: any = {
+    id: { type: "keyword" },
+    title: {
+      type: "text",
+      fields: {
+        keyword: { type: "keyword" }
+      }
+    },
+    text: {
+      type: "text",
+      fields: {
+        keyword: { type: "keyword" }
+      }
+    },
+    topic: { type: "keyword" },
+    category: { type: "keyword" }
+  };
+
+  // Add lance_vector field if dataset URI is provided
+  if (datasetUri) {
+    properties.embedding = {
+      type: "lance_vector",
+      dims: 768,
+      storage: {
+        type: "external",
+        uri: datasetUri,
+        lance_id_column: "_id",
+        lance_vector_column: "vector",
+        read_only: true
+      }
+    };
+  }
 
   const mapping = {
     mappings: {
-      properties: {
-        id: { type: "keyword" },
-        title: {
-          type: "text",
-          fields: {
-            keyword: { type: "keyword" }
-          }
-        },
-        text: { type: "text" },
-        topic: { type: "keyword" },
-        created_at: { type: "date" },
-        embedding: {
-          type: "dense_vector",
-          dims: 768,
-          index: true,
-          similarity: "cosine"
-        }
-      }
+      properties
     }
   };
 
@@ -72,7 +89,7 @@ async function createESIndex(esIndex: string): Promise<void> {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
+      'Authorization': `Basic ${Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64')}`
     },
     body: JSON.stringify(mapping)
   });
@@ -83,8 +100,8 @@ async function createESIndex(esIndex: string): Promise<void> {
   }
 }
 
-// Index a batch of documents into Elasticsearch
-async function indexDocuments(esIndex: string, documents: DocumentWithVector[]): Promise<void> {
+// Index a batch of documents into Elasticsearch (metadata only, no vectors)
+async function indexDocuments(esIndex: string, documents: DocumentMetadata[]): Promise<void> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
 
   // Prepare bulk operations
@@ -98,8 +115,7 @@ async function indexDocuments(esIndex: string, documents: DocumentWithVector[]):
         title: doc.title,
         text: doc.text,
         topic: doc.topic,
-        created_at: doc.created_at,
-        embedding: doc.vector
+        category: doc.category
       }
     );
   }
@@ -109,7 +125,7 @@ async function indexDocuments(esIndex: string, documents: DocumentWithVector[]):
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-ndjson',
-      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
+      'Authorization': `Basic ${Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64')}`
     },
     body: bulkBody.map((line) => JSON.stringify(line)).join('\n') + '\n'
   });
@@ -121,7 +137,7 @@ async function indexDocuments(esIndex: string, documents: DocumentWithVector[]):
 
   const data = await response.json();
   if (data.errors) {
-    console.error('Bulk indexing had errors:', data.items);
+    console.error('Bulk indexing had errors:', JSON.stringify(data, null, 2));
   }
 }
 
@@ -130,12 +146,18 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json() as BackfillRequest;
-    const esIndex = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
-    const shouldCreateIndex = body.createIndex !== false; // Default to true
+    const { dataset, esIndex, createIndex = true } = body;
 
+    if (!dataset) {
+      return NextResponse.json({
+        success: false,
+        error: "Dataset name is required. Please specify which dataset to backfill.",
+      }, { status: 400 });
+    }
+
+    const finalEsIndex = esIndex || process.env.ES_INDEX || 'lance-validation-test';
     const tempDir = `/tmp/lance-backfill-${Date.now()}`;
-    const datasetPath = "lance-documents/dataset.lance";
-    const localPath = `${tempDir}/dataset.lance`;
+    const datasetPath = `datasets/${dataset}`;
 
     // Create temp directory
     await fs.mkdir(tempDir, { recursive: true });
@@ -149,7 +171,7 @@ export async function POST(request: NextRequest) {
       await fs.rm(tempDir, { recursive: true, force: true });
       return NextResponse.json({
         success: false,
-        error: "No documents dataset found in OSS. Please generate documents first.",
+        error: `Dataset "${dataset}" not found in OSS. Please generate a dataset first.`,
       });
     }
 
@@ -165,7 +187,7 @@ export async function POST(request: NextRequest) {
       await client.get(obj.name, localFilePath);
     }
 
-    // Read documents with vectors using Python
+    // Read documents (metadata only, no vectors) using Python
     const pythonScript = `
 import os
 import sys
@@ -177,7 +199,7 @@ os.environ.pop('ALL_PROXY', None)
 import lance
 import json
 
-dataset_path = "${localPath}"
+dataset_path = "${tempDir}"
 
 # Open dataset
 dataset = lance.dataset(dataset_path)
@@ -185,27 +207,27 @@ dataset = lance.dataset(dataset_path)
 # Get total count
 total = dataset.count_rows()
 
-# Load all documents with vectors
-table = dataset.to_table()
+# Load all documents without vectors (vectors stored in Lance, not ES)
+table = dataset.to_table(columns=['_id', 'id', 'title', 'text', 'topic', 'category'])
 
 # Convert to list of dicts
 data = table.to_pydict()
 
 result = []
 for i in range(len(data['id'])):
-    # Extract vector data
-    vec_data = data['vector'][i]
-    if hasattr(vec_data, 'as_py'):
-        vec_data = vec_data.as_py()
-    vector_list = vec_data.tolist() if hasattr(vec_data, 'tolist') else list(vec_data)
+    # Helper function to convert PyArrow scalars
+    def to_string(val):
+        if hasattr(val, 'as_py'):
+            return val.as_py()
+        return str(val)
 
     result.append({
-        'id': data['id'][i],
-        'title': data['title'][i],
-        'text': data['text'][i],
-        'topic': data['topic'][i],
-        'created_at': data['created_at'][i],
-        'vector': vector_list
+        '_id': to_string(data['_id'][i]),
+        'id': to_string(data['id'][i]),
+        'title': to_string(data['title'][i]),
+        'text': to_string(data['text'][i]),
+        'topic': to_string(data['topic'][i]),
+        'category': to_string(data['category'][i])
     })
 
 # Output as JSON
@@ -217,7 +239,7 @@ print(json.dumps({'documents': result, 'total': total}))
     );
 
     const parsedOutput = JSON.parse(stdout.trim());
-    const documents: DocumentWithVector[] = parsedOutput.documents;
+    const documents: DocumentMetadata[] = parsedOutput.documents;
 
     if (documents.length === 0) {
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -231,9 +253,11 @@ print(json.dumps({'documents': result, 'total': total}))
     await fs.rm(tempDir, { recursive: true, force: true });
 
     // Create ES index if requested
-    if (shouldCreateIndex) {
+    if (createIndex) {
       try {
-        await createESIndex(esIndex);
+        // Construct OSS URI for lance_vector field
+        const datasetUri = `oss://${OSS_CONFIG.bucket}/${datasetPath}`;
+        await createESIndex(finalEsIndex, datasetUri);
       } catch (error: any) {
         // Index might already exist, log but continue
         console.warn('Index creation warning:', error.message);
@@ -246,7 +270,7 @@ print(json.dumps({'documents': result, 'total': total}))
 
     for (let i = 0; i < documents.length; i += batchSize) {
       const batch = documents.slice(i, i + batchSize);
-      await indexDocuments(esIndex, batch);
+      await indexDocuments(finalEsIndex, batch);
       indexedCount += batch.length;
     }
 
@@ -254,12 +278,11 @@ print(json.dumps({'documents': result, 'total': total}))
 
     return NextResponse.json({
       success: true,
-      esIndex,
+      esIndex: finalEsIndex,
       totalDocuments: documents.length,
       indexedDocuments: indexedCount,
       duration: `${duration}ms`,
-      vectorDimensions: documents[0]?.vector.length || 0,
-      message: `Successfully backfilled ${indexedCount} documents to Elasticsearch index "${esIndex}"`,
+      message: `Successfully backfilled ${indexedCount} documents (metadata only) to Elasticsearch index "${finalEsIndex}". Vectors remain in Lance/OSS for efficient kNN search.`,
     });
   } catch (error: any) {
     console.error("Backfill failed:", error);

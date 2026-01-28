@@ -41,7 +41,7 @@ interface HybridSearchResponse {
 
 // Generate embedding for query text using Jina API
 async function generateQueryEmbedding(queryText: string): Promise<number[]> {
-  const JINA_API_KEY = process.env.JINA_API_KEY;
+  const JINA_API_KEY = process.env.JINA_API_KEY || 'jina_4d22586fca5140e99831e91c67f7b09aBX3XfmHSkXlBEhn3PvJna9cZYOXb';
 
   if (!JINA_API_KEY) {
     throw new Error('JINA_API_KEY environment variable is not set');
@@ -80,7 +80,7 @@ async function performTextSearch(
   size: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-  const ES_AUTH = Buffer.from('elastic-admin:elastic-password').toString('base64');
+  const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
 
   const response = await fetch(`${ES_HOST}/${index}/_search`, {
     method: 'POST',
@@ -124,7 +124,7 @@ async function performVectorSearch(
   numCandidates: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-  const ES_AUTH = Buffer.from('elastic-admin:elastic-password').toString('base64');
+  const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
 
   const response = await fetch(`${ES_HOST}/${index}/_search`, {
     method: 'POST',
@@ -145,7 +145,9 @@ async function performVectorSearch(
   });
 
   if (!response.ok) {
-    throw new Error(`Vector search failed: ${response.statusText}`);
+    const errorText = await response.text();
+    console.error('ES kNN search error:', response.status, errorText);
+    throw new Error(`Vector search failed: ${response.status} - ${errorText}`);
   }
 
   const data = await response.json();

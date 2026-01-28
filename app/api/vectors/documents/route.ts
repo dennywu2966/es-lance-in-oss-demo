@@ -17,20 +17,34 @@ const OSS_CONFIG = {
 const client = new OSS(OSS_CONFIG);
 
 interface Document {
+  _id: string;
   id: string;
   title: string;
   text: string;
   topic: string;
-  created_at: string;
+  category: string;
+  vector: number[];
+}
+
+interface DocumentsRequest {
+  dataset?: string;
+  limit?: number;
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { limit = 20 } = body;
+    const body = await request.json() as DocumentsRequest;
+    const { dataset, limit = 20 } = body;
+
+    if (!dataset) {
+      return NextResponse.json({
+        success: false,
+        error: "Dataset name is required",
+      }, { status: 400 });
+    }
 
     const tempDir = `/tmp/lance-docs-fetch-${Date.now()}`;
-    const datasetPath = "lance-documents/dataset.lance";
+    const datasetPath = `datasets/${dataset}`;
     const localPath = `${tempDir}/dataset.lance`;
 
     // Create temp directory
@@ -45,7 +59,7 @@ export async function POST(request: NextRequest) {
       await fs.rm(tempDir, { recursive: true, force: true });
       return NextResponse.json({
         success: false,
-        error: "No documents dataset found. Please generate documents first.",
+        error: `Dataset "${dataset}" not found. Please generate a dataset first.`,
       });
     }
 
@@ -72,7 +86,7 @@ os.environ.pop('ALL_PROXY', None)
 
 import lance
 
-dataset_path = "${localPath}"
+dataset_path = "${tempDir}"
 limit = ${limit}
 
 # Open dataset
@@ -81,23 +95,30 @@ dataset = lance.dataset(dataset_path)
 # Get total count
 total = dataset.count_rows()
 
-# Load all documents (or limited number)
+# Load all documents (or limited number) - exclude vector field for display
 if limit > 0:
-    table = dataset.to_table(columns=['id', 'title', 'text', 'topic', 'created_at'], limit=limit)
+    table = dataset.to_table(columns=['_id', 'id', 'title', 'text', 'topic', 'category'], limit=limit)
 else:
-    table = dataset.to_table(columns=['id', 'title', 'text', 'topic', 'created_at'])
+    table = dataset.to_table(columns=['_id', 'id', 'title', 'text', 'topic', 'category'])
 
 # Convert to list of dicts
 documents = table.to_pydict()
 
 result = []
 for i in range(len(documents['id'])):
+    # Helper function to convert PyArrow scalars
+    def to_string(val):
+        if hasattr(val, 'as_py'):
+            return val.as_py()
+        return str(val)
+
     result.append({
-        'id': documents['id'][i],
-        'title': documents['title'][i],
-        'text': documents['text'][i],
-        'topic': documents['topic'][i],
-        'created_at': documents['created_at'][i]
+        '_id': to_string(documents['_id'][i]),
+        'id': to_string(documents['id'][i]),
+        'title': to_string(documents['title'][i]),
+        'text': to_string(documents['text'][i]),
+        'topic': to_string(documents['topic'][i]),
+        'category': to_string(documents['category'][i])
     })
 
 # Output as JSON

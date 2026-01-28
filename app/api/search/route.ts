@@ -318,7 +318,7 @@ async function searchThroughElasticsearch(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
+      'Authorization': `Basic ${Buffer.from('elastic:jZq_c30hq8QMpRwOrOCD').toString('base64')}`
     },
     body: JSON.stringify(queryBody)
   });

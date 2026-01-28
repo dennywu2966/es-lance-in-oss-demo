@@ -80,6 +80,30 @@ The Python script embedded in `oss-client.ts` (lines 116-174) clears proxy env v
 ### Elasticsearch Integration
 Demo expects Elasticsearch at `http://localhost:9200` (configurable in `app/api/search/route.ts`).
 
+**ES Configuration:**
+- Location: `../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT`
+- Authentication: `elastic:mdNf7J+HVTB33syeww7i` (HTTP Basic Auth) - **Note: Password auto-regenerates on ES restart**
+- Plugins: `lance-vector`, `security-realm-cloud-iam`
+- Security enabled with trial license
+- HTTP SSL disabled for development
+
+**To reset ES password:**
+```bash
+cd ../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
+./bin/elasticsearch-reset-password -u elastic -b
+```
+
+**To start ES:**
+```bash
+cd ../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
+./start_es_with_plugins.sh -d -p elasticsearch.pid
+```
+
+**OSS Configuration:**
+- Bucket: `denny-test-lance`
+- Endpoint: `oss-ap-southeast-1.aliyuncs.com`
+- Credentials: `~/.oss/credentials.json`
+
 ### TypeScript Configuration
 - Path aliases: `@/*` maps to project root
 - Strict mode enabled
@@ -92,3 +116,27 @@ Demo expects Elasticsearch at `http://localhost:9200` (configurable in `app/api/
 - Glass morphism UI pattern heavily used (`.glass-card`)
 - No test framework configured
 - No CI/CD configuration present
+
+### Testing with Playwright MCP
+
+**IMPORTANT: This is an Ubuntu server without X11. Always use headless mode for Playwright.**
+
+**Prefer using the Playwright MCP server** over native Playwright:
+- Use `mcp__playwright__browser_*` tools for browser automation
+- Playwright MCP automatically handles headless mode on Ubuntu
+- For manual Playwright testing, use `chromium.launch({ headless: true })`
+
+**Playwright MCP Examples:**
+```bash
+# Navigate to page
+mcp__playwright__browser_navigate?url=http://localhost:3000
+
+# Take snapshot
+mcp__playwright__browser_snapshot
+
+# Fill form
+mcp__playwright__browser_type?ref=...&text=...
+
+# Click button
+mcp__playwright__browser_click?ref=...
+```

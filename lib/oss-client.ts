@@ -98,7 +98,7 @@ export async function deleteDataset(datasetName: string): Promise<{ success: boo
   }
 }
 
-// Generate Lance dataset and upload to OSS
+// Generate Lance dataset and upload to OSS with GLM docs and Jina embeddings
 export async function generateAndUploadDataset(
   vectors: number,
   dims: number
@@ -108,11 +108,131 @@ export async function generateAndUploadDataset(
   const datasetName = `vectors-${vectors}-dims-${dims}-${Date.now()}`;
   const localPath = `${tempDir}/${datasetName}.lance`;
 
+  const GLM_API_KEY = process.env.GLM_API_KEY || '74830934db8146fb84b2c12daa182d5f.NnK1nfrYHm4Tqdgc';
+  const JINA_API_KEY = process.env.JINA_API_KEY || 'jina_4d22586fca5140e99831e91c67f7b09aBX3XfmHSkXlBEhn3PvJna9cZYOXb';
+
   try {
     // Create temp directory
     await fs.mkdir(tempDir, { recursive: true });
 
-    // Generate Lance dataset using Python
+    // Step 1: Generate fake documents using GLM API
+    console.log('Generating documents with GLM...');
+    const documents: Array<{id: string; title: string; text: string; topic: string}> = [];
+
+    // Generate documents in batches
+    const batchSize = 5;
+    for (let i = 0; i < vectors; i += batchSize) {
+      const currentBatch = Math.min(batchSize, vectors - i);
+
+      for (let j = 0; j < currentBatch; j++) {
+        const topics = ['Vector Databases', 'Machine Learning', 'Elasticsearch', 'Cloud Computing', 'Neural Networks', 'Natural Language Processing', 'DevOps', 'Data Engineering', 'Microservices', 'Deep Learning'];
+        const selectedTopic = topics[Math.floor(Math.random() * topics.length)];
+
+        try {
+          const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${GLM_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: 'GLM-4-Flash',
+              messages: [
+                {
+                  role: 'user',
+                  content: `Generate a short technical document (150-200 words) about ${selectedTopic}. Include a title and the main content. Return as JSON with "title" and "text" fields.`
+                }
+              ],
+              temperature: 0.7,
+              max_tokens: 500,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`GLM API error: ${response.status}`);
+          }
+
+          const data = await response.json();
+          const content = data.choices[0].message.content;
+
+          // Parse the JSON response
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const docContent = JSON.parse(jsonMatch[0]);
+            documents.push({
+              id: `doc_${String(i + j).padStart(4, '0')}`,
+              title: docContent.title || `${selectedTopic} Overview`,
+              text: docContent.text || content,
+              topic: selectedTopic
+            });
+          } else {
+            // Fallback if JSON parsing fails
+            documents.push({
+              id: `doc_${String(i + j).padStart(4, '0')}`,
+              title: `${selectedTopic} - Document ${i + j}`,
+              text: content,
+              topic: selectedTopic
+            });
+          }
+
+          // Rate limiting delay
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error: any) {
+          console.error(`Failed to generate document ${i + j}:`, error.message);
+          // Fallback to simple text
+          documents.push({
+            id: `doc_${String(i + j).padStart(4, '0')}`,
+            title: `${selectedTopic} - Article ${i + j}`,
+            text: `This document discusses ${selectedTopic} concepts, implementations, and best practices in modern software development.`,
+            topic: selectedTopic
+          });
+        }
+      }
+    }
+
+    console.log(`Generated ${documents.length} documents`);
+
+    // Step 2: Generate embeddings using Jina API
+    console.log('Generating embeddings with Jina...');
+    const embeddings: number[][] = [];
+
+    for (const doc of documents) {
+      try {
+        const response = await fetch('https://api.jina.ai/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${JINA_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: 'jina-embeddings-v2-base-en',
+            input: doc.text,
+            encoding_type: 'float',
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Jina API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.data && data.data[0] && data.data[0].embedding) {
+          embeddings.push(data.data[0].embedding);
+        } else {
+          throw new Error('Invalid response format from Jina API');
+        }
+
+        // Rate limiting delay
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error: any) {
+        console.error(`Failed to generate embedding for ${doc.id}:`, error.message);
+        throw error;
+      }
+    }
+
+    console.log(`Generated ${embeddings.length} embeddings with ${embeddings[0].length} dimensions`);
+
+    // Step 3: Create Lance dataset with documents and embeddings
     const pythonScript = `
 import os
 import sys
@@ -125,21 +245,29 @@ import numpy as np
 import lance
 import pyarrow as pa
 
-n_vectors = ${vectors}
-dims = ${dims}
 output_path = "${localPath}"
 
-# Create normalized vectors
-vectors_array = np.random.randn(n_vectors, dims).astype(np.float32)
-vectors_array = vectors_array / np.linalg.norm(vectors_array, axis=1, keepdims=True)
+# Document and embedding data
+documents_data = ${JSON.stringify(documents.map((doc, idx) => ({
+      _id: doc.id,
+      ...doc,
+      vector: embeddings[idx]
+    })))}
 
-# Define schema with pa.string() for Java compatibility
+# Extract vectors
+vectors_array = np.array([doc['vector'] for doc in documents_data], dtype=np.float32)
+
+# Define schema with all document fields
+dims = vectors_array.shape[1]
 vector_type = pa.list_(pa.float32(), list_size=dims)
 schema = pa.schema([
     pa.field('_id', pa.string()),
-    pa.field('vector', vector_type),
+    pa.field('id', pa.string()),
+    pa.field('title', pa.string()),
+    pa.field('text', pa.string()),
+    pa.field('topic', pa.string()),
     pa.field('category', pa.string()),
-    pa.field('text', pa.string())  # Text field for backfilling ES documents
+    pa.field('vector', vector_type)
 ])
 
 # Create FixedSizeListArray
@@ -149,32 +277,25 @@ vector_array = pa.FixedSizeListArray.from_arrays(
     dims
 )
 
-# Generate text content for each document
-text_templates = [
-    "This document discusses {category} innovations and developments in the field.",
-    "An analysis of {category} trends and their impact on modern society.",
-    "Exploring {category} concepts and their practical applications.",
-    "Understanding {category} methodologies and best practices.",
-    "{category} research findings and theoretical frameworks."
-]
-texts = [np.random.choice(text_templates).format(category=cat) for cat in
-          np.random.choice(['tech', 'science', 'business', 'finance', 'health'], n_vectors)]
-
 # Create table
-categories = np.random.choice(['tech', 'science', 'business', 'finance', 'health'], n_vectors)
+categories = np.array([doc['topic'] for doc in documents_data])
 table = pa.table({
-    '_id': [f"doc_{i}" for i in range(n_vectors)],
-    'vector': vector_array,
+    '_id': pa.array([doc['_id'] for doc in documents_data]),
+    'id': pa.array([doc['id'] for doc in documents_data]),
+    'title': pa.array([doc['title'] for doc in documents_data]),
+    'text': pa.array([doc['text'] for doc in documents_data]),
+    'topic': pa.array([doc['topic'] for doc in documents_data]),
     'category': pa.array(categories.tolist()),
-    'text': pa.array(texts)
+    'vector': vector_array
 }, schema=schema)
 
 # Write dataset
 dataset = lance.write_dataset(table, output_path)
 
-# Create IVF-PQ index (skip for small datasets)
-if n_vectors >= 256:
-    num_partitions = max(2, min(n_vectors // 100, 256))
+# Create IVF-PQ index for larger datasets
+n_vectors = len(documents_data)
+if n_vectors >= 100:
+    num_partitions = max(2, min(n_vectors // 10, 32))
     dataset.create_index(
         column='vector',
         index_type='IVF_PQ',
@@ -183,7 +304,7 @@ if n_vectors >= 256:
         num_sub_vectors=min(dims // 8, 64)
     )
 
-print(f"Created: {dataset.count_rows()} vectors, {dims} dims")
+print(f"Created: {dataset.count_rows()} documents with {dims}-dim vectors")
 `;
 
     await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
@@ -206,8 +327,8 @@ print(f"Created: {dataset.count_rows()} vectors, {dims} dims")
     return {
       success: true,
       dataset: datasetName,
-      vectors,
-      dims,
+      vectors: documents.length,
+      dims: embeddings[0].length,
       uploadTime,
     };
   } catch (error: any) {
@@ -216,8 +337,8 @@ print(f"Created: {dataset.count_rows()} vectors, {dims} dims")
 
     return {
       success: false,
-      vectors,
-      dims,
+      vectors: 0,
+      dims: 0,
       error: error.message,
     };
   }

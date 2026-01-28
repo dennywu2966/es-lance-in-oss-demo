@@ -55,11 +55,13 @@ interface SampleResponse {
 }
 
 interface Document {
+  _id: string;
   id: string;
   title: string;
   text: string;
   topic: string;
-  created_at: string;
+  category: string;
+  vector: number[];
 }
 
 interface DocumentsResponse {
@@ -245,16 +247,24 @@ export function VectorManagement() {
     }
   };
 
-  const loadDocuments = async () => {
+  const loadDocuments = async (datasetName?: string) => {
     setIsLoadingDocuments(true);
     setError(null);
     setSuccess(null);
 
     try {
+      // Use provided dataset name or first available dataset
+      const targetDataset = datasetName || (datasets.length > 0 ? datasets[0].name : null);
+
+      if (!targetDataset) {
+        setError("No dataset available to load documents from");
+        return;
+      }
+
       const res = await fetch("/api/vectors/documents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 20 }),
+        body: JSON.stringify({ dataset: targetDataset, limit: 20 }),
       });
 
       const data: DocumentsResponse = await res.json();
@@ -278,10 +288,17 @@ export function VectorManagement() {
     setSuccess(null);
 
     try {
+      if (datasets.length === 0) {
+        setError("No dataset available to backfill");
+        return;
+      }
+
+      const dataset = datasets[0];
+
       const res = await fetch("/api/vectors/backfill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ dataset: dataset.name }),
       });
 
       const data = await res.json();
@@ -681,7 +698,7 @@ export function VectorManagement() {
                                 SAMPLE
                               </button>
                               <button
-                                onClick={loadDocuments}
+                                onClick={() => loadDocuments(dataset.name)}
                                 disabled={isLoadingDocuments || isGenerating || isSampling}
                                 className="glass-card-success hover:bg-emerald-500/20 px-3 py-1.5 text-xs font-mono text-emerald-400 flex items-center gap-2 transition-colors disabled:opacity-50"
                               >
@@ -849,8 +866,8 @@ export function VectorManagement() {
                                   {doc.topic}
                                 </span>
                                 <span className="text-gray-600 text-xs font-mono flex items-center gap-1">
-                                  <Clock className="w-3 h-3" />
-                                  {new Date(doc.created_at).toLocaleDateString()}
+                                  <Database className="w-3 h-3" />
+                                  {doc.category}
                                 </span>
                               </div>
                             </div>
