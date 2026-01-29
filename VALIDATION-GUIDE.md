@@ -7,16 +7,52 @@ This guide provides comprehensive validation procedures for the Lance Vector Plu
 
 ## Table of Contents
 
-1. [Prerequisites](#prerequisites)
-2. [Environment Setup](#environment-setup)
-3. [Service Startup Validation](#service-startup-validation)
-4. [Vector Management Validation](#vector-management-validation)
-5. [kNN Search Validation](#knn-search-validation)
-6. [Hybrid Search Validation](#hybrid-search-validation)
-7. [Backfill Validation](#backfill-validation)
-8. [End-to-End UI Validation](#end-to-end-ui-validation)
-9. [Common Issues and Solutions](#common-issues-and-solutions)
-10. [Regression Test Checklist](#regression-test-checklist)
+1. [Validation Progress Log](#validation-progress-log)
+2. [Prerequisites](#prerequisites)
+3. [Environment Setup](#environment-setup)
+4. [Service Startup Validation](#service-startup-validation)
+5. [Vector Management Validation](#vector-management-validation)
+6. [kNN Search Validation](#knn-search-validation)
+7. [Hybrid Search Validation](#hybrid-search-validation)
+8. [Backfill Validation](#backfill-validation)
+9. [End-to-End UI Validation](#end-to-end-ui-validation)
+   - [Playwright Script Tests](#playwright-script-tests)
+   - [Playwright MCP Validation](#playwright-mcp-validation)
+10. [Common Issues and Solutions](#common-issues-and-solutions)
+11. [Regression Test Checklist](#regression-test-checklist)
+12. [Automated Test Script](#automated-test-script)
+13. [Conclusion](#conclusion)
+
+---
+
+## Validation Progress Log
+
+### 2026-01-29: Hybrid Search Complete Validation
+
+**Validation Method**: Playwright MCP (headless browser automation)
+
+**Features Validated**:
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Hybrid Search Mode | ✅ Pass | Switches from kNN to text input correctly |
+| Query Text Input | ✅ Pass | Accepts and submits "machine learning" query |
+| Search Execution | ✅ Pass | Returns 5 fused results with HYBRID match type |
+| Timing Breakdown | ✅ Pass | Shows Embedding, Text, Vector, RRF phases |
+| lance_knn Format | ✅ Pass | Frontend displays correct Lance query format |
+| kNN Search Mode | ✅ Pass | Mode switching works correctly |
+| Custom Query Mode | ✅ Pass | JSON editor with example queries loads |
+| Vector Management | ✅ Pass | Shows dataset info (10 vectors, 128 dims) |
+| Documents View | ✅ Pass | Displays all 10 documents correctly |
+
+**Key Implementation Confirmed**:
+- API uses `lance_knn` format (not ES native `knn`)
+- ES profiling enabled (`profile: true`)
+- ES profile parsing extracts `lance_vector_query_ms`
+- ES auth password: `Summer11` (line 87 of `app/api/search/hybrid/route.ts`)
+
+**Screenshots**: `/tmp/playwright-output/hybrid-search-validation.png`
+
+**Commit**: `e16939f` - feat: Use Lance-specific query format with ES profiling
 
 ---
 
@@ -328,6 +364,43 @@ curl -s -X POST http://localhost:3000/api/search \
 
 ## Hybrid Search Validation
 
+### Important Implementation Notes (Updated 2026-01-29)
+
+**Lance Vector Plugin Query Format:**
+- Hybrid Search uses Lance-specific `lance_knn` format (NOT ES native `knn`)
+- Query structure: `{ "query": { "lance_knn": { "field": "embedding", ... } } }`
+- ES profiling is enabled (`profile: true`) for detailed timing breakdown
+- ES profile data is parsed to extract `lance_vector_query_ms` timing
+- Frontend displays the correct Lance query format in "Show ES Request"
+
+**ES Authentication:**
+- Current password: `Summer11` (auto-regenerates on ES restart)
+- Update required: `app/api/search/hybrid/route.ts` line 87
+
+**ES Environment Variables (Required for lance_knn):**
+```bash
+# ES must be started with OSS_ENDPOINT set
+export OSS_ENDPOINT="oss-ap-southeast-1.aliyuncs.com"
+export OSS_ACCESS_KEY_ID="YOUR_KEY"
+export OSS_ACCESS_KEY_SECRET="YOUR_SECRET"
+```
+
+**Query Format Comparison:**
+
+| Format | Structure | Used By |
+|--------|-----------|---------|
+| **lance_knn** (Current) | `{ "query": { "lance_knn": {...} } }` | Lance Vector Plugin |
+| knn (ES Native) | `{ "knn": {...} }` | Elasticsearch native |
+
+**ES Profile Structure:**
+```
+profile.shards[0].searches[0].query[]
+  └─ type: "LanceKnnQuery"
+  └─ time_in_nanos: NUMBER
+  └─ description: "LanceKnnQuery(embedding, uri=oss://...)"
+  └─ breakdown: { next_doc, match, next_reader, ... }
+```
+
 ### Test 1: Hybrid Search with Query Text
 
 ```bash
@@ -360,9 +433,10 @@ curl -s -X POST http://localhost:3000/api/search/hybrid \
 #   "timingBreakdown": [
 #     {"phase": "Embedding Generation", "duration": NUMBER, "startOffset": NUMBER},
 #     {"phase": "Text Search (BM25)", "duration": NUMBER, "startOffset": NUMBER},
-#     {"phase": "Vector Search (kNN)", "duration": NUMBER, "startOffset": NUMBER},
+#     {"phase": "Vector Search (kNN)", "duration": NUMBER, "startOffset": NUMBER, "lance_vector_query_ms": "NUMBER", "query_type": "LanceKnnQuery", "description": "...", "breakdown": {...}},
 #     {"phase": "RRF Fusion", "duration": NUMBER, "startOffset": NUMBER}
-#   ]
+#   ],
+#   "esProfile": {...}  // Raw ES profile data for debugging
 # }
 
 # Validations:
@@ -414,6 +488,70 @@ curl -s -X POST http://localhost:3000/api/search/hybrid \
   -d '{"queryText": "test", "k": 1}' | jq '.queryVector | map(select(. != 0)) | length'
 
 # Expected: Many non-zero values (hundreds at least)
+```
+
+### Test 4: Verify Lance Vector Plugin Query Format
+
+```bash
+# Verify the API uses Lance-specific lance_knn format
+# Check the actual query sent to ES (via timing breakdown)
+
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "test", "k": 1}' | jq '.timingBreakdown[2]'
+
+# Expected output includes Lance-specific fields:
+# {
+#   "phase": "Vector Search (kNN)",
+#   "duration": NUMBER,
+#   "startOffset": NUMBER,
+#   "lance_vector_query_ms": "NUMBER",  // Lance plugin timing
+#   "query_type": "LanceKnnQuery",       // Confirms Lance plugin
+#   "description": "LanceKnnQuery(embedding, uri=oss://...)",
+#   "breakdown": {
+#     "next_doc": NUMBER,
+#     "match": NUMBER,
+#     "next_reader": NUMBER,
+#     ...
+#   }
+# }
+
+# Verify esProfile contains raw ES profiling data
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "test", "k": 1}' | jq '.esProfile.shards[0].searches[0].query[] | select(.type == "LanceKnnQuery")'
+
+# Expected: Query type is "LanceKnnQuery" (not "KnnQuery")
+```
+
+### Test 5: Verify Frontend Display Format (UI)
+
+```bash
+# When using the UI, the "Show ES Request" button should display
+# the Lance-specific query format, not the ES native knn format
+
+# Expected display format:
+# {
+#   "profile": true,
+#   "query": {
+#     "lance_knn": {          // Lance-specific format
+#       "field": "embedding",
+#       "query_vector": [...],
+#       "k": 5,
+#       "num_candidates": 10
+#     }
+#   },
+#   "size": 5,
+#   "_source": ["id", "category", "text"]
+# }
+
+# NOT the old format:
+# {
+#   "knn": {                  // ES native format (DEPRECATED)
+#     "field": "embedding",
+#     ...
+#   }
+# }
 ```
 
 ---
@@ -521,6 +659,8 @@ curl -s -u "elastic:$ES_PASSWORD" -X POST "http://localhost:9200/test-backfill-i
 ---
 
 ## End-to-End UI Validation
+
+### Playwright Script Tests
 
 ### Prerequisites
 
@@ -740,9 +880,50 @@ node /tmp/test_custom_ui.js
 # Expected: Exit code 0
 ```
 
+### Playwright MCP Validation
+
+When Playwright MCP server is connected, you can use MCP tools directly for UI validation:
+
+```javascript
+// Using MCP tools for headless browser automation
+
+// 1. Navigate to application
+mcp__playwright__browser_navigate?url=http://localhost:3000
+
+// 2. Take snapshot to see current state
+mcp__playwright__browser_snapshot
+
+// 3. Interact with UI elements
+mcp__playwright__browser_click?ref=BUTTON_REF
+mcp__playwright__browser_type?ref=INPUT_REF&text=search+query
+
+// 4. Take screenshot for verification
+mcp__playwright__browser_take_screenshot?filename=validation.png&fullPage=true
+
+// 5. Close browser when done
+mcp__playwright__browser_close
+```
+
+**Complete Hybrid Search UI Validation (Playwright MCP):**
+```bash
+# This workflow was validated on 2026-01-29
+# All features passed successfully
+
+# Test steps executed:
+1. Navigate to http://localhost:3000
+2. Click "Hybrid Search" button
+3. Enter "machine learning" in text input
+4. Click "Execute Hybrid Search" button
+5. Confirm search execution
+6. Verify results are displayed (5 results with HYBRID match type)
+7. Verify timing breakdown shows all phases
+8. Click "Show ES Request" to verify lance_knn format
+9. Take full-page screenshot
+```
+
 ---
 
-## Common Issues and Solutions
+## Common Issues and Solutions {#common-issues-and-solutions}
 
 ### Issue 1: Elasticsearch Authentication Failed
 
@@ -762,7 +943,34 @@ NEW_PASSWORD="generated_password"
 find app/api -name "*.ts" -exec sed -i "s/elastic:.*'/elastic:$NEW_PASSWORD'/g" {} \;
 ```
 
-### Issue 2: Lance Vector Plugin Cannot Access OSS
+### Issue 2: Lance Vector Plugin - OSS Endpoint Not Set
+
+**Symptoms:**
+```
+"Invalid user input: OSS endpoint is required. Please provide 'oss_endpoint' in storage options or set OSS_ENDPOINT environment variable"
+```
+
+**Cause:**
+The Lance Vector Plugin now requires OSS_ENDPOINT environment variable when using `lance_knn` query format.
+
+**Solution:**
+```bash
+# Kill existing ES process
+kill $(cat /path/to/elasticsearch.pid)
+
+# Restart ES with OSS_ENDPOINT environment variable
+cd /path/to/elasticsearch-9.2.4-SNAPSHOT
+env OSS_ENDPOINT=oss-ap-southeast-1.aliyuncs.com \
+     OSS_ACCESS_KEY_ID="YOUR_KEY" \
+     OSS_ACCESS_KEY_SECRET="YOUR_SECRET" \
+     ./start_es_with_plugins.sh -d -p elasticsearch.pid
+
+# Verify environment variable is set
+cat /proc/$(cat elasticsearch.pid)/environ | tr '\0' '\n' | grep OSS_ENDPOINT
+# Expected: OSS_ENDPOINT=oss-ap-southeast-1.aliyuncs.com
+```
+
+### Issue 3: Lance Vector Plugin Cannot Access OSS
 
 **Symptoms:**
 ```
@@ -781,7 +989,7 @@ export OSS_ENDPOINT="oss-ap-southeast-1.aliyuncs.com"
 # Restart ES after changing endpoint
 ```
 
-### Issue 3: Hybrid Search Returns 401/500
+### Issue 4: Hybrid Search Returns 401/500
 
 **Symptoms:**
 ```json
@@ -813,7 +1021,7 @@ curl -s -u "elastic:PASS" -X POST "http://localhost:9200/lance-validation-test/_
 tail -100 /tmp/dev-server.log | grep -i error
 ```
 
-### Issue 4: Jina API Not Working
+### Issue 5: Jina API Not Working
 
 **Symptoms:**
 ```json
@@ -833,7 +1041,7 @@ tail -100 /tmp/dev-server.log | grep -i error
 export JINA_API_KEY="jina_..."
 ```
 
-### Issue 5: Playwright Tests Fail on Ubuntu
+### Issue 6: Playwright Tests Fail on Ubuntu
 
 **Symptoms:**
 ```
@@ -848,7 +1056,7 @@ const browser = await chromium.launch({ headless: true });
 # NEVER use headed: false or default (which is headed) on Ubuntu servers
 ```
 
-### Issue 6: Backfill Returns 400 Errors
+### Issue 7: Backfill Returns 400 Errors
 
 **Symptoms:**
 ```json
@@ -873,7 +1081,7 @@ bulkBody.push(
 
 ---
 
-## Regression Test Checklist
+## Regression Test Checklist {#regression-test-checklist}
 
 Use this checklist for quick regression testing before committing changes or releasing updates.
 
@@ -924,6 +1132,10 @@ curl -s http://localhost:3000/api/vectors/list | jq '.success'
 - [ ] Match type indicators are correct (text/vector/hybrid)
 - [ ] Query vector has 768 dimensions
 - [ ] Timing breakdown shows all phases
+- [ ] **Vector Search timing includes `lance_vector_query_ms` field**
+- [ ] **ES profile shows `LanceKnnQuery` type (not `KnnQuery`)**
+- [ ] **Frontend "Show ES Request" displays `lance_knn` format**
+- [ ] **esProfile raw data is returned in response**
 
 #### Backfill
 - [ ] Backfill creates ES index
@@ -967,7 +1179,7 @@ curl -s -u "elastic:$ES_PASSWORD" -X DELETE http://localhost:9200/test-*
 
 ---
 
-## Automated Test Script
+## Automated Test Script {#automated-test-script}
 
 For complete automation, save this script as `run-validation.sh`:
 
@@ -1049,7 +1261,7 @@ chmod +x run-validation.sh
 
 ---
 
-## Conclusion
+## Conclusion {#conclusion}
 
 This validation guide provides:
 1. **Comprehensive test coverage** for all features
