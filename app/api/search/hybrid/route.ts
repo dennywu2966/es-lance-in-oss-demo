@@ -24,6 +24,9 @@ interface TimingBreakdown {
   phase: string;
   duration: number;
   startOffset: number;
+  lance_vector_query_ms?: string;
+  breakdown?: any;
+  [key: string]: any; // Allow additional properties
 }
 
 interface HybridSearchResponse {
@@ -37,6 +40,7 @@ interface HybridSearchResponse {
   error?: string;
   latency?: string;
   timingBreakdown?: TimingBreakdown[];
+  esProfile?: any; // Raw ES profiling data for debugging
 }
 
 // Generate embedding for query text using Jina API
@@ -80,7 +84,7 @@ async function performTextSearch(
   size: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-  const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
+  const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
   const response = await fetch(`${ES_HOST}/${index}/_search`, {
     method: 'POST',
@@ -124,7 +128,7 @@ async function performVectorSearch(
   numCandidates: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
   const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-  const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
+  const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
   const response = await fetch(`${ES_HOST}/${index}/_search`, {
     method: 'POST',
@@ -133,11 +137,14 @@ async function performVectorSearch(
       'Authorization': `Basic ${ES_AUTH}`,
     },
     body: JSON.stringify({
-      knn: {
-        field: 'embedding',
-        query_vector: queryVector,
-        k,
-        num_candidates: numCandidates,
+      profile: true,
+      query: {
+        lance_knn: {
+          field: 'embedding',
+          query_vector: queryVector,
+          k,
+          num_candidates: numCandidates,
+        }
       },
       size: k,
       _source: ['id', 'category', 'text'],
@@ -160,7 +167,15 @@ async function performVectorSearch(
     matchType: 'vector' as const,
   }));
 
-  return { results, totalHits: data.hits.total.value };
+  // Extract profile data for detailed timing breakdown
+  let profileData: any = null;
+  if (data.profile) {
+    profileData = data.profile;
+    // Log profile for debugging
+    console.log('ES Profile:', JSON.stringify(profileData, null, 2));
+  }
+
+  return { results, totalHits: data.hits.total.value, profile: profileData };
 }
 
 // RRF (Reciprocal Rank Fusion) scoring
@@ -257,6 +272,7 @@ export async function POST(req: NextRequest) {
     let vectorResults: HybridSearchResult[] = [];
     let fusionResults: HybridSearchResult[] = [];
     let finalQueryVector = queryVector;
+    let esProfileData: any = null;
 
     // Generate embedding from query text if no query vector provided
     if (queryText && !queryVector) {
@@ -305,11 +321,45 @@ export async function POST(req: NextRequest) {
       const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
       const vectorSearchDuration = Date.now() - vectorSearchStart;
       vectorResults = vectorSearch.results;
-      timingBreakdown.push({
+      esProfileData = vectorSearch.profile; // Store profile data for response
+
+      // Extract detailed timing from ES profile if available
+      let detailedTiming = {
         phase: 'Vector Search (kNN)',
         duration: vectorSearchDuration,
         startOffset: vectorSearchStart - startTime,
-      });
+      } as any;
+
+      if (vectorSearch.profile) {
+        // Parse ES profile to get Lance Vector Plugin timing breakdown
+        const profile = vectorSearch.profile;
+        if (profile.shards && profile.shards[0]) {
+          const shard = profile.shards[0];
+          // ES profile structure: shard.searches[x].query[y]
+          if (shard.searches && shard.searches.length > 0) {
+            for (const searchEntry of shard.searches) {
+              if (searchEntry.query && Array.isArray(searchEntry.query)) {
+                for (const query of searchEntry.query) {
+                  if (query.type === 'LanceKnnQuery' || query.type === 'LanceVectorQuery') {
+                    if (query.time_in_nanos) {
+                      const lanceTimeMs = query.time_in_nanos / 1_000_000;
+                      detailedTiming.lance_vector_query_ms = lanceTimeMs.toFixed(2);
+                      detailedTiming.query_type = query.type;
+                      detailedTiming.description = query.description;
+                      if (query.breakdown) {
+                        detailedTiming.breakdown = query.breakdown;
+                      }
+                    }
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      timingBreakdown.push(detailedTiming);
     }
 
     // Perform fusion if both searches were performed
@@ -340,6 +390,7 @@ export async function POST(req: NextRequest) {
       queryVector: finalQueryVector,
       latency: `${latency}ms`,
       timingBreakdown,
+      esProfile: esProfileData, // Include raw ES profile for debugging
     });
   } catch (error: any) {
     console.error('Hybrid search error:', error);

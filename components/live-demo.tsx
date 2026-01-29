@@ -237,17 +237,20 @@ export function LiveDemo() {
       };
 
       const vectorBody = {
-        knn: {
-          field: "embedding",
-          query_vector: response.queryVector,
-          k: topK,
-          num_candidates: topK * 2,
+        profile: enableProfiling,
+        query: {
+          lance_knn: {
+            field: "embedding",
+            query_vector: response.queryVector,
+            k: topK,
+            num_candidates: topK * 2,
+          }
         },
         size: topK,
         _source: ["id", "category", "text"],
       };
 
-      return `// Hybrid Search - Text Query (BM25):\n${JSON.stringify(hybridBody, null, 2)}\n\n// Hybrid Search - Vector Query (kNN):\n${JSON.stringify(vectorBody, null, 2)}`;
+      return `// Hybrid Search - Text Query (BM25):\n${JSON.stringify(hybridBody, null, 2)}\n\n// Hybrid Search - Vector Query (Lance kNN):\n${JSON.stringify(vectorBody, null, 2)}`;
     }
 
     // For kNN search, generate vector query
@@ -255,11 +258,13 @@ export function LiveDemo() {
 
     const queryBody = {
       profile: enableProfiling,
-      knn: {
-        field: "embedding",
-        query_vector: response.queryVector,
-        k: topK,
-        num_candidates: topK * 2,
+      query: {
+        lance_knn: {
+          field: "embedding",
+          query_vector: response.queryVector,
+          k: topK,
+          num_candidates: topK * 2,
+        }
       },
       size: topK,
       _source: ["category", "text"],
