@@ -1,8 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getOSSConfig } from "@/lib/oss-client";
 
 const execAsync = promisify(exec);
+
+// Helper with timeout and env support
+function execWithTimeout(command: string, timeout: number, env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Command timed out after ${timeout}ms`));
+    }, timeout);
+
+    const options = env ? { env: { ...process.env, ...env } } : undefined;
+    const proc = exec(command, options, (error, stdout, stderr) => {
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 interface VectorSampleRequest {
   dataset: string;
@@ -19,6 +40,9 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { dataset, count = 10 } = body as VectorSampleRequest;
+
+    // Get OSS config for Python script
+    const ossConfig = await getOSSConfig();
 
     if (!dataset) {
       return NextResponse.json(
@@ -46,8 +70,8 @@ import lance
 import random
 
 # OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
+auth = oss2.Auth(os.environ.get("OSS_ACCESS_KEY_ID", ""), os.environ.get("OSS_ACCESS_KEY_SECRET", ""))
+bucket = oss2.Bucket(auth, os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com"), os.environ.get("OSS_BUCKET", "denny-test-lance"))
 
 # Dataset path in OSS
 temp_dir = "${tempDir}"
@@ -113,7 +137,15 @@ shutil.rmtree(temp_dir, ignore_errors=True)
 print(json.dumps({'success': True, 'samples': samples, 'total': total_count}))
 `;
 
-    const { stdout } = await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
+    // Prepare environment with OSS credentials
+    const env = {
+      OSS_ACCESS_KEY_ID: ossConfig.accessKeyId,
+      OSS_ACCESS_KEY_SECRET: ossConfig.accessKeySecret,
+      OSS_ENDPOINT: `${ossConfig.region}.aliyuncs.com`,
+      OSS_BUCKET: ossConfig.bucket,
+    };
+
+    const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000, env);
 
     const data = JSON.parse(stdout.trim());
 

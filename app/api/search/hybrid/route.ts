@@ -83,41 +83,49 @@ async function performTextSearch(
   queryText: string,
   size: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
-  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
   const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
-  const response = await fetch(`${ES_HOST}/${index}/_search`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${ES_AUTH}`,
-    },
-    body: JSON.stringify({
-      query: {
-        match: {
-          text: queryText,
-        },
+  // Ignore self-signed certificates for local ES
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  try {
+    const response = await fetch(`${ES_HOST}/${index}/_search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${ES_AUTH}`,
       },
-      size,
-      _source: ['id', 'category', 'text'],
-    }),
-  });
+      body: JSON.stringify({
+        query: {
+          match: {
+            text: queryText,
+          },
+        },
+        size,
+        _source: ['id', 'category', 'text'],
+      }),
+    });
 
-  if (!response.ok) {
-    throw new Error(`Text search failed: ${response.statusText}`);
+    if (!response.ok) {
+      throw new Error(`Text search failed: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    const results: HybridSearchResult[] = data.hits.hits.map((hit: any) => ({
+      id: hit._source?.id || hit._id,
+      category: hit._source?.category || 'unknown',
+      text: hit._source?.text || '',
+      score: hit._score || 0,
+      matchType: 'text' as const,
+    }));
+
+    return { results, totalHits: data.hits.total.value };
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
   }
-
-  const data = await response.json();
-
-  const results: HybridSearchResult[] = data.hits.hits.map((hit: any) => ({
-    id: hit._source?.id || hit._id,
-    category: hit._source?.category || 'unknown',
-    text: hit._source?.text || '',
-    score: hit._score || 0,
-    matchType: 'text' as const,
-  }));
-
-  return { results, totalHits: data.hits.total.value };
 }
 
 // Perform vector kNN search
@@ -126,56 +134,64 @@ async function performVectorSearch(
   queryVector: number[],
   k: number,
   numCandidates: number
-): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
-  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+): Promise<{ results: HybridSearchResult[]; totalHits: number; profile?: any }> {
+  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
   const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
-  const response = await fetch(`${ES_HOST}/${index}/_search`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${ES_AUTH}`,
-    },
-    body: JSON.stringify({
-      profile: true,
-      query: {
-        lance_knn: {
-          field: 'embedding',
-          query_vector: queryVector,
-          k,
-          num_candidates: numCandidates,
-        }
+  // Ignore self-signed certificates for local ES
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  try {
+    const response = await fetch(`${ES_HOST}/${index}/_search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${ES_AUTH}`,
       },
-      size: k,
-      _source: ['id', 'category', 'text'],
-    }),
-  });
+      body: JSON.stringify({
+        profile: true,
+        query: {
+          lance_knn: {
+            field: 'embedding',
+            query_vector: queryVector,
+            k,
+            num_candidates: numCandidates,
+          }
+        },
+        size: k,
+        _source: ['id', 'category', 'text'],
+      }),
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('ES kNN search error:', response.status, errorText);
-    throw new Error(`Vector search failed: ${response.status} - ${errorText}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('ES kNN search error:', response.status, errorText);
+      throw new Error(`Vector search failed: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    const results: HybridSearchResult[] = data.hits.hits.map((hit: any) => ({
+      id: hit._source?.id || hit._id,
+      category: hit._source?.category || 'unknown',
+      text: hit._source?.text || '',
+      score: hit._score || 0,
+      matchType: 'vector' as const,
+    }));
+
+    // Extract profile data for detailed timing breakdown
+    let profileData: any = null;
+    if (data.profile) {
+      profileData = data.profile;
+      // Log profile for debugging
+      console.log('ES Profile:', JSON.stringify(profileData, null, 2));
+    }
+
+    return { results, totalHits: data.hits.total.value, profile: profileData };
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
   }
-
-  const data = await response.json();
-
-  const results: HybridSearchResult[] = data.hits.hits.map((hit: any) => ({
-    id: hit._source?.id || hit._id,
-    category: hit._source?.category || 'unknown',
-    text: hit._source?.text || '',
-    score: hit._score || 0,
-    matchType: 'vector' as const,
-  }));
-
-  // Extract profile data for detailed timing breakdown
-  let profileData: any = null;
-  if (data.profile) {
-    profileData = data.profile;
-    // Log profile for debugging
-    console.log('ES Profile:', JSON.stringify(profileData, null, 2));
-  }
-
-  return { results, totalHits: data.hits.total.value, profile: profileData };
 }
 
 // RRF (Reciprocal Rank Fusion) scoring
@@ -318,17 +334,18 @@ export async function POST(req: NextRequest) {
     // Perform vector search if query vector provided or generated
     if (finalQueryVector) {
       const vectorSearchStart = Date.now();
-      const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
-      const vectorSearchDuration = Date.now() - vectorSearchStart;
-      vectorResults = vectorSearch.results;
-      esProfileData = vectorSearch.profile; // Store profile data for response
+      try {
+        const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
+        const vectorSearchDuration = Date.now() - vectorSearchStart;
+        vectorResults = vectorSearch.results;
+        esProfileData = vectorSearch.profile; // Store profile data for response
 
-      // Extract detailed timing from ES profile if available
-      let detailedTiming = {
-        phase: 'Vector Search (kNN)',
-        duration: vectorSearchDuration,
-        startOffset: vectorSearchStart - startTime,
-      } as any;
+        // Extract detailed timing from ES profile if available
+        let detailedTiming = {
+          phase: 'Vector Search (kNN)',
+          duration: vectorSearchDuration,
+          startOffset: vectorSearchStart - startTime,
+        } as any;
 
       if (vectorSearch.profile) {
         // Parse ES profile to get Lance Vector Plugin timing breakdown
@@ -360,6 +377,18 @@ export async function POST(req: NextRequest) {
       }
 
       timingBreakdown.push(detailedTiming);
+      } catch (vectorError: any) {
+        // Vector search failed - log warning and fall back to text-only search
+        console.warn('Vector search failed, falling back to text-only:', vectorError.message);
+        timingBreakdown.push({
+          phase: 'Vector Search (kNN)',
+          duration: 0,
+          startOffset: Date.now() - startTime,
+          error: vectorError.message,
+        });
+        // Clear finalQueryVector to indicate vector search failed
+        finalQueryVector = undefined;
+      }
     }
 
     // Perform fusion if both searches were performed

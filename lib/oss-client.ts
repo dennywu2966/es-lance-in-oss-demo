@@ -6,15 +6,49 @@ import path from 'path';
 
 const execAsync = promisify(exec);
 
-// OSS Configuration
-const OSS_CONFIG = {
-  region: process.env.OSS_REGION || 'oss-ap-southeast-1',
-  accessKeyId: process.env.OSS_ACCESS_KEY_ID || '',
-  accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || '',
-  bucket: process.env.OSS_BUCKET || 'denny-test-lance',
-};
+// Read OSS credentials from file or environment variables
+export async function getOSSConfig() {
+  // Try environment variables first
+  if (process.env.OSS_ACCESS_KEY_ID && process.env.OSS_ACCESS_KEY_SECRET) {
+    const endpoint = process.env.OSS_ENDPOINT || 'oss-ap-southeast-1.aliyuncs.com';
+    return {
+      region: endpoint.replace('.aliyuncs.com', ''),
+      accessKeyId: process.env.OSS_ACCESS_KEY_ID,
+      accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET,
+      bucket: process.env.OSS_BUCKET || 'denny-test-lance',
+    };
+  }
 
-const client = new OSS(OSS_CONFIG);
+  // Fallback to credentials file - bucket is in Singapore region
+  try {
+    const credsPath = path.join(process.env.HOME || '', '.oss', 'credentials.json');
+    const credsContent = await fs.readFile(credsPath, 'utf-8');
+    const creds = JSON.parse(credsContent);
+
+    // The denny-test-lance bucket is in Singapore region (ap-southeast-1)
+    const region = 'oss-ap-southeast-1';
+
+    return {
+      region,
+      accessKeyId: creds.access_key_id,
+      accessKeySecret: creds.access_key_secret,
+      bucket: 'denny-test-lance',
+    };
+  } catch (error) {
+    throw new Error('Failed to read OSS credentials from environment or ~/.oss/credentials.json');
+  }
+}
+
+// Lazy OSS client - initialized on first use
+let clientInstance: OSS | null = null;
+
+export async function getClient(): Promise<OSS> {
+  if (!clientInstance) {
+    const config = await getOSSConfig();
+    clientInstance = new OSS(config);
+  }
+  return clientInstance;
+}
 
 export interface VectorDataset {
   name: string;
@@ -36,6 +70,7 @@ export interface GenerateResult {
 // List all Lance datasets in OSS
 export async function listDatasets(): Promise<VectorDataset[]> {
   try {
+    const client = await getClient();
     const result = await client.list({
       prefix: 'datasets/',
       'max-keys': 100,
@@ -80,6 +115,7 @@ export async function listDatasets(): Promise<VectorDataset[]> {
 // Delete a dataset from OSS
 export async function deleteDataset(datasetName: string): Promise<{ success: boolean; error?: string }> {
   try {
+    const client = await getClient();
     const result = await client.list({
       prefix: `datasets/${datasetName}/`,
     });
@@ -310,6 +346,7 @@ print(f"Created: {dataset.count_rows()} documents with {dims}-dim vectors")
     await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
 
     // Upload to OSS
+    const client = await getClient();
     const files = await getAllFiles(localPath);
 
     for (const file of files) {
@@ -660,6 +697,7 @@ print(f"Created: {dataset.count_rows()} documents with ${dims}-dim vectors")
     await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
 
     // Upload to OSS
+    const client = await getClient();
     const files = await getAllFiles(localPath);
 
     for (const file of files) {

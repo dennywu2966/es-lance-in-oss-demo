@@ -1,20 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import OSS from "ali-oss";
+import { getClient } from "@/lib/oss-client";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 
 const execAsync = promisify(exec);
-
-// OSS Configuration
-const OSS_CONFIG = {
-  region: process.env.OSS_REGION || "oss-ap-southeast-1",
-  accessKeyId: process.env.OSS_ACCESS_KEY_ID || "",
-  accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || "",
-  bucket: process.env.OSS_BUCKET || "denny-test-lance",
-};
-
-const client = new OSS(OSS_CONFIG);
 
 interface Document {
   _id: string;
@@ -51,6 +41,7 @@ export async function POST(request: NextRequest) {
     await fs.mkdir(tempDir, { recursive: true });
 
     // Download dataset from OSS
+    const client = await getClient();
     const result = await client.list({
       prefix: datasetPath,
     });

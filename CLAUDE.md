@@ -109,6 +109,12 @@ cd ../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
 - Strict mode enabled
 - Build ignores TypeScript errors (see `next.config.ts`)
 
+## Validation & Testing
+
+For comprehensive E2E validation, API tests, and UI smoke tests, see:
+- **Validation Guide:** `reg_validation_guide.md` - Complete testing procedures with Playwright MCP examples
+- **Validation Script:** `/lance-demo-validation` skill - Automated validation via Python script
+
 ## Development Notes
 
 - Dark mode is forced (`<html lang="en" className="dark">` in `app/layout.tsx`)

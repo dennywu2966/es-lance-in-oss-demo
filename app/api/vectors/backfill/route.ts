@@ -1,20 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getClient } from "@/lib/oss-client";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
-import OSS from "ali-oss";
 
 const execAsync = promisify(exec);
-
-// OSS Configuration
-const OSS_CONFIG = {
-  region: process.env.OSS_REGION || "oss-ap-southeast-1",
-  accessKeyId: process.env.OSS_ACCESS_KEY_ID || "",
-  accessKeySecret: process.env.OSS_ACCESS_KEY_SECRET || "",
-  bucket: process.env.OSS_BUCKET || "denny-test-lance",
-};
-
-const client = new OSS(OSS_CONFIG);
 
 interface BackfillRequest {
   dataset?: string;
@@ -44,9 +34,14 @@ interface DocumentMetadata {
 
 // Create Elasticsearch index with proper mapping for metadata + lance_vector field
 async function createESIndex(esIndex: string, datasetUri?: string): Promise<void> {
-  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
 
-  const properties: any = {
+  // Ignore self-signed certificates for local ES
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  try {
+    const properties: any = {
     id: { type: "keyword" },
     title: {
       type: "text",
@@ -89,7 +84,7 @@ async function createESIndex(esIndex: string, datasetUri?: string): Promise<void
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Basic ${Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64')}`
+      'Authorization': `Basic ${Buffer.from('elastic:Summer11').toString('base64')}`
     },
     body: JSON.stringify(mapping)
   });
@@ -98,14 +93,22 @@ async function createESIndex(esIndex: string, datasetUri?: string): Promise<void
     // 400 might mean index already exists, which is ok
     throw new Error(`Failed to create ES index: ${response.status} ${response.statusText}`);
   }
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
+  }
 }
 
 // Index a batch of documents into Elasticsearch (metadata only, no vectors)
 async function indexDocuments(esIndex: string, documents: DocumentMetadata[]): Promise<void> {
-  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
+  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
 
-  // Prepare bulk operations
-  const bulkBody: any[] = [];
+  // Ignore self-signed certificates for local ES
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  try {
+    // Prepare bulk operations
+    const bulkBody: any[] = [];
 
   for (const doc of documents) {
     bulkBody.push(
@@ -125,7 +128,7 @@ async function indexDocuments(esIndex: string, documents: DocumentMetadata[]): P
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-ndjson',
-      'Authorization': `Basic ${Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64')}`
+      'Authorization': `Basic ${Buffer.from('elastic:Summer11').toString('base64')}`
     },
     body: bulkBody.map((line) => JSON.stringify(line)).join('\n') + '\n'
   });
@@ -138,6 +141,9 @@ async function indexDocuments(esIndex: string, documents: DocumentMetadata[]): P
   const data = await response.json();
   if (data.errors) {
     console.error('Bulk indexing had errors:', JSON.stringify(data, null, 2));
+  }
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
   }
 }
 
@@ -163,6 +169,7 @@ export async function POST(request: NextRequest) {
     await fs.mkdir(tempDir, { recursive: true });
 
     // Download dataset from OSS
+    const client = await getClient();
     const result = await client.list({
       prefix: datasetPath,
     });
@@ -256,7 +263,7 @@ print(json.dumps({'documents': result, 'total': total}))
     if (createIndex) {
       try {
         // Construct OSS URI for lance_vector field
-        const datasetUri = `oss://${OSS_CONFIG.bucket}/${datasetPath}`;
+        const datasetUri = `oss://denny-test-lance/${datasetPath}`;
         await createESIndex(finalEsIndex, datasetUri);
       } catch (error: any) {
         // Index might already exist, log but continue

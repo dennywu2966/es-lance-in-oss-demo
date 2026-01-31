@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getOSSConfig } from "@/lib/oss-client";
 
 const execAsync = promisify(exec);
 
 // Helper with timeout
-function execWithTimeout(command: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
+function execWithTimeout(command: string, timeout: number, env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       proc.kill('SIGTERM');
       reject(new Error(`Command timed out after ${timeout}ms`));
     }, timeout);
 
-    const proc = exec(command, (error, stdout, stderr) => {
+    const options = env ? { env: { ...process.env, ...env } } : undefined;
+    const proc = exec(command, options, (error, stdout, stderr) => {
       clearTimeout(timer);
       if (error) {
         reject(error);
@@ -87,7 +89,8 @@ async function searchLanceDataset(
   queryVector: number[],
   k: number,
   numCandidates: number,
-  profile: boolean = false
+  profile: boolean = false,
+  ossConfig?: { accessKeyId: string; accessKeySecret: string; region: string; bucket: string }
 ): Promise<LanceSearchOutput> {
   const tempDir = `/tmp/lance-search-${Date.now()}`;
 
@@ -115,8 +118,8 @@ PROFILE = ${profileFlag}
 timing = {}
 
 # OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
+auth = oss2.Auth(os.environ.get("OSS_ACCESS_KEY_ID", ""), os.environ.get("OSS_ACCESS_KEY_SECRET", ""))
+bucket = oss2.Bucket(auth, os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com"), os.environ.get("OSS_BUCKET", "denny-test-lance"))
 
 # Dataset path in OSS
 temp_dir = "${tempDir}"
@@ -280,7 +283,15 @@ if PROFILE:
 print(json.dumps(output))
 `;
 
-  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000);
+  // Prepare environment with OSS credentials
+  const env = {
+    OSS_ACCESS_KEY_ID: ossConfig?.accessKeyId || '',
+    OSS_ACCESS_KEY_SECRET: ossConfig?.accessKeySecret || '',
+    OSS_ENDPOINT: ossConfig?.region ? `${ossConfig.region}.aliyuncs.com` : 'oss-ap-southeast-1.aliyuncs.com',
+    OSS_BUCKET: ossConfig?.bucket || 'denny-test-lance',
+  };
+
+  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000, env);
 
   const parsed = JSON.parse(stdout.trim()) as LanceSearchOutput;
   return {
@@ -364,7 +375,10 @@ async function searchThroughElasticsearch(
 }
 
 // Get a random vector from the dataset to use as query
-async function getRandomVector(dataset: string): Promise<{ vector: number[]; vectorsCount: number; dimensions: number }> {
+async function getRandomVector(
+  dataset: string,
+  ossConfig?: { accessKeyId: string; accessKeySecret: string; region: string; bucket: string }
+): Promise<{ vector: number[]; vectorsCount: number; dimensions: number }> {
   const tempDir = `/tmp/lance-random-${Date.now()}`;
 
   const pythonScript = `
@@ -382,8 +396,8 @@ import oss2
 import lance
 
 # OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
+auth = oss2.Auth(os.environ.get("OSS_ACCESS_KEY_ID", ""), os.environ.get("OSS_ACCESS_KEY_SECRET", ""))
+bucket = oss2.Bucket(auth, os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com"), os.environ.get("OSS_BUCKET", "denny-test-lance"))
 
 temp_dir = "${tempDir}"
 dataset_name = "${dataset}"
@@ -436,7 +450,15 @@ print(json.dumps({
 }))
 `;
 
-  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000);
+  // Prepare environment with OSS credentials
+  const env = {
+    OSS_ACCESS_KEY_ID: ossConfig?.accessKeyId || '',
+    OSS_ACCESS_KEY_SECRET: ossConfig?.accessKeySecret || '',
+    OSS_ENDPOINT: ossConfig?.region ? `${ossConfig.region}.aliyuncs.com` : 'oss-ap-southeast-1.aliyuncs.com',
+    OSS_BUCKET: ossConfig?.bucket || 'denny-test-lance',
+  };
+
+  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000, env);
 
   return JSON.parse(stdout.trim());
 }
@@ -450,6 +472,9 @@ export async function POST(req: NextRequest) {
     const numCandidates = body.numCandidates || k * 2;
     const profile = body.profile || false;
     const useExistingVector = body.useExistingVector || false;
+
+    // Get OSS config for Python scripts
+    const ossConfig = await getOSSConfig();
 
     // Get the latest dataset if not specified
     let dataset = body.dataset;
@@ -487,11 +512,11 @@ export async function POST(req: NextRequest) {
       queryVector = body.queryVector;
     } else if (!useExistingVector) {
       // Get a random vector from the dataset to use as query
-      const randomVecData = await getRandomVector(dataset);
+      const randomVecData = await getRandomVector(dataset, ossConfig);
       queryVector = randomVecData.vector;
     } else {
       // Get a random vector as fallback
-      const randomVecData = await getRandomVector(dataset);
+      const randomVecData = await getRandomVector(dataset, ossConfig);
       queryVector = randomVecData.vector;
     }
 
@@ -511,7 +536,8 @@ export async function POST(req: NextRequest) {
       queryVector,
       k,
       numCandidates,
-      profile
+      profile,
+      ossConfig
     );
     searchResults = {
       results: lanceResults.results,
