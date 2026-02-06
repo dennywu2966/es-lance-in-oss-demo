@@ -3,7 +3,7 @@
 import { motion } from "framer-motion";
 import { Search, Zap, AlertCircle, RotateCw, CheckCircle2, ChevronDown, Activity, Eye, Database, Code, FileText, Sparkles } from "lucide-react";
 import { useState } from "react";
-import { slideUp } from "@/lib/animations";
+import { slideUp } from "@/shared/lib/animations";
 import { WaterfallTimeline } from "./waterfall-timeline";
 
 interface TimingBreakdown {

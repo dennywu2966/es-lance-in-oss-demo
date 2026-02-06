@@ -1,8 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getOSSConfig } from "@/lib/oss-client";
 
 const execAsync = promisify(exec);
+
+// Helper with timeout and env support
+function execWithTimeout(command: string, timeout: number, env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Command timed out after ${timeout}ms`));
+    }, timeout);
+
+    const options = env ? { env: { ...process.env, ...env } } : undefined;
+    const proc = exec(command, options, (error, stdout, stderr) => {
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 interface VectorMetadataRequest {
   dataset: string;
@@ -23,6 +44,9 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { dataset } = body as VectorMetadataRequest;
+
+    // Get OSS config for Python script
+    const ossConfig = await getOSSConfig();
 
     if (!dataset) {
       return NextResponse.json(
@@ -45,11 +69,11 @@ for var in list(os.environ.keys()):
         del os.environ[var]
 
 import oss2
-import lance
+import lancedb
 
 # OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
+auth = oss2.Auth(os.environ.get("OSS_ACCESS_KEY_ID", ""), os.environ.get("OSS_ACCESS_KEY_SECRET", ""))
+bucket = oss2.Bucket(auth, os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com"), os.environ.get("OSS_BUCKET", "denny-test-lance"))
 
 # Dataset path in OSS
 temp_dir = "${tempDir}"
@@ -72,12 +96,25 @@ for obj in result.object_list:
             f.write(object_data.read())
         downloaded += 1
 
-# Open Lance dataset
-dataset = lance.dataset(temp_dir)
+# Open Lance dataset using LanceDB (new API)
+db = lancedb.connect(temp_dir)
+
+# Get table names - handle different LanceDB response formats
+tables_response = db.list_tables()
+if isinstance(tables_response, list):
+    table_names = tables_response
+elif hasattr(tables_response, 'tables'):
+    table_names = tables_response.tables
+else:
+    table_names = list(tables_response)
+
+if not table_names:
+    raise Exception("No tables found in LanceDB database")
+table = db.open_table(table_names[0])
 
 # Get metadata
-vectors_count = dataset.count_rows()
-schema = dataset.schema
+vectors_count = table.count_rows()
+schema = table.schema
 
 # Get vector dimensions from schema
 vector_dim = None
@@ -104,7 +141,16 @@ metadata = {
 print(json.dumps({'success': True, 'metadata': metadata}))
 `;
 
-    const { stdout } = await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
+    // Prepare environment with OSS credentials
+    const env = {
+      OSS_ACCESS_KEY_ID: ossConfig.accessKeyId,
+      OSS_ACCESS_KEY_SECRET: ossConfig.accessKeySecret,
+      OSS_ENDPOINT: (ossConfig as any).endpoint || `${ossConfig.region}.aliyuncs.com`,
+      OSS_REGION: ossConfig.region,
+      OSS_BUCKET: ossConfig.bucket,
+    };
+
+    const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000, env);
 
     const data = JSON.parse(stdout.trim());
 

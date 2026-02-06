@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { Shield, Rocket, TrendingUp, CheckCircle2, ArrowRight } from "lucide-react";
-import { ctaContent } from "@/lib/data";
-import { slideUp, staggerContainer } from "@/lib/animations";
+import { ctaContent } from "@/shared/lib/data";
+import { slideUp, staggerContainer } from "@/shared/lib/animations";
 
 export function CTA() {
   return (

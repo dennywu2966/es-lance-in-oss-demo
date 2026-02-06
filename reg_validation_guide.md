@@ -1,8 +1,19 @@
 # Regression Test & E2E Validation Guide
 ## Lance Vector Plugin Demo (es-lance-demo)
 
-**Last Updated:** 2026-01-31
-**Status:** ✅ Hybrid Search Fully Working (Text + Vector Fusion)
+**Last Updated:** 2026-02-05
+**Status:** ✅ All 8 API regression tests pass • UI kNN + Hybrid smoke tests pass
+
+**Recent Migration Changes:**
+- Migrated from old `lance` package to new `lancedb` package (>= 0.27)
+- Fixed LanceDB table creation format (list of dicts vs dict of lists)
+- Updated dataset generation to use Python FastAPI backend
+- Fixed dimension alignment (768 dims for Jina embeddings)
+- kNN search validated working with new LanceDB API
+- Hybrid search validated working with RRF fusion
+- **NEW:** Restored Sample Documents and Backfill to ES features after FSD refactoring
+- **NEW:** LanceDB API migration for documents/backfill APIs
+- **NEW:** ES password reset to Summer11
 
 ---
 
@@ -198,6 +209,54 @@ curl -s -X POST http://localhost:3000/api/search/hybrid \
 # Expected: true
 ```
 
+### 6. Get Dataset Metadata
+```bash
+curl -s -X POST http://localhost:3000/api/vectors/metadata \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"test-small-20-dims-768"}' | jq .
+
+# Expected:
+{
+  "success": true,
+  "metadata": {
+    "name": "test-small-20-dims-768",
+    "vectors": 20,
+    "dimensions": 768,
+    "schema": {
+      "id": "string",
+      "vector": "fixed_size_list[768]",
+      "category": "string"
+    }
+  }
+}
+```
+
+**Note:** This endpoint downloads the dataset from OSS, opens it with LanceDB, and extracts schema metadata including vector count and dimensions.
+
+### 7. Sample Vectors
+```bash
+curl -s -X POST http://localhost:3000/api/vectors/sample \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"test-small-20-dims-768", "count": 5}' | jq '.success'
+
+# Expected: true
+
+# Full response includes:
+{
+  "success": true,
+  "samples": [
+    {
+      "id": "doc_0001",
+      "vector": [0.123, 0.456, ...],  // 768 dimensions
+      "category": "Machine Learning"
+    }
+  ],
+  "total": 20
+}
+```
+
+**Note:** Returns random samples from the dataset with full vector data.
+
 ---
 
 ## UI Feature Tests (Playwright MCP)
@@ -245,8 +304,7 @@ mcp__playwright__browser_click?ref=<EXECUTE_KNN_BUTTON_REF>
 // 2. Click "Confirm & Search" in confirmation dialog
 mcp__playwright__browser_click?ref=<CONFIRM_SEARCH_REF>
 
-// 3. Expected: Search results appear or error message
-// Note: May fail due to OSS env vars not passed to Python (see Known Issues)
+// 3. Expected: Search results appear
 ```
 
 ### Test 5: Hybrid Search ✅ FULLY WORKING
@@ -372,6 +430,76 @@ mcp__playwright__browser_click?ref=<TRY_AGAIN_BUTTON_REF>
 // Shows search parameters confirmation again
 ```
 
+### Test 14: SAMPLE DOCUMENTS Feature ✅ NEWLY RESTORED
+```javascript
+// 1. In Vector Management section, click "Sample Documents" button
+mcp__playwright__browser_click?ref=<SAMPLE_DOCUMENTS_BUTTON_REF>
+
+// 2. Verify documents modal appears with proper z-index (no overlap)
+// Expected: "Sampled 10 documents from 10 total"
+// Modal title: "Sampled Documents"
+// Description: "Showing 10 documents with all fields (max 10)"
+// Shows document cards with:
+//   - Index number (#1, #2, etc.)
+//   - Primary Key (PK: doc_0000)
+//   - Document ID (ID: doc_0000)
+//   - Title (e.g., "Introduction to Vector Databases")
+//   - Category tag (e.g., "Vector Databases")
+//   - Full text content
+//   - Close button (X) in header
+
+// 3. Verify modal z-index prevents page overlap
+// The modal should appear ABOVE all other page content
+// Background: dark overlay with backdrop blur
+// z-index: 100 (was previously 50, causing overlap issues)
+```
+
+### Test 15: BACKFILL TO ES Feature ✅ NEWLY RESTORED
+```javascript
+// 1. In Vector Management section, ensure dataset exists
+// Refresh if needed to show dataset
+
+// 2. Click "Backfill to ES" button
+mcp__playwright__browser_click?ref=<BACKFILL_ES_BUTTON_REF>
+
+// 3. Verify progress bar appears
+// Expected: Blue-themed progress bar with animation
+// Shows: "Backfilling to Elasticsearch..."
+// Shows: "Indexing documents with lance_vector field"
+// Progress bar: animated sliding indicator (indeterminate)
+
+// 4. After completion, verify success message
+// Expected: "Successfully backfilled X documents to Elasticsearch in Yms"
+// Shows ES index name and document count
+// ES index created with:
+//   - lance_vector field pointing to OSS dataset
+//   - Metadata fields (id, title, text, topic, category)
+```
+
+### Test 16: SHOW DOC with Full Text Content ✅ FIXED
+```javascript
+// 1. Execute kNN search first (follow Test 4)
+mcp__playwright__browser_click?ref=<EXECUTE_KNN_BUTTON_REF>
+mcp__playwright__browser_click?ref=<CONFIRM_SEARCH_REF>
+
+// 2. After search completes, click "SHOW DOC" button for any result
+mcp__playwright__browser_click?ref=<SHOW_DOC_BUTTON_REF>
+
+// 3. Expected: Document details panel appears with FULL text content:
+//   - "Original Document" heading
+//   - "Primary Key (_id)": doc_XXXX
+//   - "Category": [category name]
+//   - "Text Content": [FULL TEXT - not just preview]
+//     Previously showed "No text content available" - NOW FIXED
+//     The kNN search API now includes "text" field in _source
+//   - Button toggles to "HIDE DOC"
+
+// Note: Text content is available because:
+// - /api/search route was updated to include "text" in _source
+// - ES documents store metadata with text field
+// - Lance vectors remain in OSS for efficient kNN search
+```
+
 ---
 
 ## Known Issues & Fixes
@@ -465,6 +593,214 @@ mcp__playwright__browser_click?ref=<TRY_AGAIN_BUTTON_REF>
   - `OSS_ENDPOINT=oss-ap-southeast-1.aliyuncs.com`
 - Deleted and recreated ES index via backfill API
 
+### Issue 8: LanceDB API Incompatibility
+**Symptom:** "Cannot add a single dictionary to a table. Use a list."
+**Root Cause:** Old `lance` package format incompatible with new `lancedb` (>= 0.27) API
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Modified `backend/services/lance.py` to use list-of-dicts format for table creation
+- Changed from: `table_data = {'col1': [val1, val2], 'col2': [val3, val4]}`
+- Changed to: `table_data = [{'col1': val1, 'col2': val3}, {'col1': val2, 'col2': val4}]`
+- Updated dataset generation workflow to use new LanceDB Python API
+
+**Files Modified:**
+- `backend/services/lance.py`
+
+### Issue 9: Vector Dimension Mismatch (128 vs 768)
+**Symptom:** "query dim(128) doesn't match the column vector vector dim(768)"
+**Root Cause:** Jina embeddings API returns fixed 768-dim vectors, but frontend was generating 128-dim random vectors
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Updated `features/live-demo/ui/live-demo.tsx` to generate 768-dim vectors
+- Note: Jina embeddings are fixed at 768 dimensions (not configurable)
+- Dataset generation now uses 768 dims by default
+
+**Files Modified:**
+- `features/live-demo/ui/live-demo.tsx`
+
+### Issue 10: CORS Configuration for Next.js Port 3001
+**Symptom:** "Access to fetch at 'http://localhost:8000' has been blocked by CORS policy"
+**Root Cause:** Python backend only allowed port 3000, but Next.js was running on 3001
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Updated `backend/main.py` to allow both ports 3000 and 3001
+- Changed `allow_origins=["http://localhost:3000"]` to `allow_origins=["http://localhost:3000", "http://localhost:3001"]`
+
+**Files Modified:**
+- `backend/main.py`
+
+### Issue 11: FSD Refactoring Removed Features
+**Symptom:** "View Documents" and "Backfill to ES" buttons missing from UI
+**Root Cause:** FSD refactoring from `components/vector-management.tsx` to `features/vector-mgmt/ui/vector-management.tsx` accidentally dropped:
+- Documents viewer functionality
+- Backfill to Elasticsearch button
+- Per-dataset action buttons
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Restored documents viewer with modal display at z-index 100 (was 50, causing overlap)
+- Added backfill progress bar with animated indicator
+- Renamed "View Documents" to "Sample Documents" for clarity
+- Limited document sampling to 10 documents (was 20)
+- Added both top-level action buttons and per-dataset action buttons
+
+**Files Modified:**
+- `features/vector-mgmt/ui/vector-management.tsx`
+- `features/live-demo/ui/results-display.tsx` (document text display)
+
+### Issue 12: LanceDB API Migration for Documents/Backfill APIs
+**Symptom:** `AttributeError: module 'lance' has no attribute 'dataset'`
+**Root Cause:** Documents and Backfill APIs were using old `lance.dataset()` API incompatible with new lancedb (>= 0.27)
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Modified `app/api/vectors/documents/route.ts` to use new LanceDB API:
+  - Changed from `lance.dataset()` to `lancedb.connect()`
+  - Fixed `list_tables()` response handling (tables_response.tables attribute)
+  - Updated Arrow table conversion to pandas for column filtering
+- Modified `app/api/vectors/backfill/route.ts` with same LanceDB API changes
+
+**Files Modified:**
+- `app/api/vectors/documents/route.ts`
+- `app/api/vectors/backfill/route.ts`
+
+### Issue 13: ES Password Reset
+**Symptom:** ES 401 authentication errors
+**Root Cause:** ES password auto-regenerated on restart, was `k9l9e1XxbCwq3unPdcXe`
+**Status:** ✅ FIXED - Reset to `Summer11`
+
+**Fix Applied:**
+- Reset ES password using `elasticsearch-reset-password -u elastic -i`
+- Updated all API files with new password:
+  - `app/api/search/route.ts`
+  - `app/api/search/hybrid/route.ts`
+  - `app/api/search/custom/route.ts`
+  - `app/api/vectors/backfill/route.ts`
+- Updated validation guide with correct password
+
+**Files Modified:**
+- All 4 API files above
+- `reg_validation_guide.md`
+
+### Issue 14: Show Doc Missing Text Content
+**Symptom:** "SHOW DOC" button showed "No text content available"
+**Root Cause:** kNN search API only fetched `category` field from ES, not `text`
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Modified `app/api/search/route.ts` to include `text` in `_source` specification
+- Changed from `_source: ["category"]` to `_source: ["id", "category", "text"]`
+
+**Files Modified:**
+- `app/api/search/route.ts`
+
+### Issue 15: Metadata API Python Script Missing OSS Credentials
+**Symptom:** `KeyError: 'OSS_ACCESS_KEY_ID'` in Python child process for metadata endpoint
+**Root Cause:** Python script spawned by metadata API doesn't inherit environment variables; also had LanceDB API compatibility issue
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Modified `app/api/vectors/metadata/route.ts` to import `getOSSConfig()` from `lib/oss-client.ts`
+- Added `execWithTimeout()` helper to accept and pass environment variables
+- Modified Python script to use `os.environ.get()` with fallback defaults
+- Fixed LanceDB `list_tables()` response handling (same pattern as sample route)
+
+**Files Modified:**
+- `app/api/vectors/metadata/route.ts`
+
+### Issue 16: Jina API 429 Rate-Limit — Generate Dataset & Hybrid Search
+**Symptom:** Generate Dataset returns `{"success":false,"error":"Jina API error: 429"}`. Hybrid Search fails with `Failed to generate embedding for query text: Jina API error: 429 - ...`
+**Root Cause:** Both `generateAndUploadDataset` (oss-client.ts) and `generateQueryEmbedding` (hybrid/route.ts) call Jina embeddings without any retry logic. Jina enforces per-minute rate limits; parallel batch requests and back-to-back hybrid searches hit this limit.
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Added `jinaFetchWithRetry()` helper in `lib/oss-client.ts` — exponential backoff (1s → 2s → 4s) with up to 3 retries on HTTP 429, and `Retry-After` header support.
+- Wired the helper into the embedding batch loop in `generateAndUploadDataset`.
+- Exported the helper for reuse; `hybrid/route.ts` `generateQueryEmbedding` now uses the same retry wrapper.
+
+**Files Modified:**
+- `lib/oss-client.ts` — added `jinaFetchWithRetry`, used in batch embedding loop
+- `app/api/search/hybrid/route.ts` — `generateQueryEmbedding` uses `jinaFetchWithRetry`
+
+---
+
+### Issue 17: Generate Dataset Thundering-Herd on Jina 429
+**Symptom:** Generate Dataset fails with `Jina API error: 429 (exhausted 3 retries)` even after Issue 16 retry wrapper was added.
+**Root Cause:** The batch loop in `generateAndUploadDataset` fired N parallel `jinaFetchWithRetry` calls via `batch.map(async ...)`. When all N hit 429 simultaneously, each retried independently at the same delay — creating another simultaneous burst (thundering herd). Additionally, the `Retry-After` header cap was 30 s, which could truncate Jina's actual cooldown window.
+**Status:** ✅ FIXED
+
+**Fix Applied (two changes in `lib/oss-client.ts`):**
+1. **Retry-After cap raised:** `Math.min(..., 30000)` → `Math.min(..., 120000)` — honours Jina cooldowns up to 2 min.
+2. **Collapsed N parallel calls into a single batched Jina API call.** Jina's `/v1/embeddings` endpoint accepts `input: string[]` and returns embeddings in order. The batch loop now sends one request per batch instead of one per document. The generate path uses `(5 retries, 2 s base delay)` since it is slow-tolerant.
+
+**Regression guard:** `/tmp/run_regression.py` test 8 ("Generate Dataset") covers this. If it regresses, look for parallel Jina calls in the batch loop.
+
+---
+
+### Issue 18: UI Hybrid Search 500 — esIndex Mismatch
+**Symptom:** Hybrid Search returns 500 in the browser UI but succeeds via `curl`. Network trace shows Jina embedding returns 200, so the failure is downstream (ES query phase).
+**Root Cause:** The UI (`features/live-demo/ui/live-demo.tsx`) sanitised the selected dataset name into an ES index name and sent it as `esIndex`:
+```typescript
+// WRONG — dataset name ≠ ES index name
+const esIndex = selectedDataset.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+```
+All datasets share the single ES index `lance-validation-test`. Sending a non-existent index name (e.g. `real-87k-dims-768`) caused ES to 404, which the route surfaced as 500. `curl` worked because it omitted `esIndex`, letting the route default to `lance-validation-test`.
+**Status:** ✅ FIXED
+
+**Fix Applied (`features/live-demo/ui/live-demo.tsx`):**
+- Removed the `esIndex` computation entirely.
+- Send `dataset: selectedDataset` instead (informational; the route defaults its ES index server-side).
+- Removed the now-dead client-side `rrfFusion` function (fusion is done server-side in the route).
+
+**Regression guard:** After any UI change to the hybrid search path, verify in Playwright that clicking "Hybrid Search → Execute → Confirm" returns results. The route's `ES_INDEX` default (`lance-validation-test`) must not be overridden by the frontend.
+
+---
+
+### Issue 19: Backfill Python KeyError on Sparse-Schema Datasets
+**Symptom:** Switching to `test-small-20-dims-768` in the Search Dataset dropdown triggers backfill, which crashes with `KeyError: 'id'` inside the embedded Python script.
+**Root Cause:** The Python result-builder in `backfill/route.ts` correctly filtered the DataFrame to `available_columns`, but the `result.append(...)` block unconditionally accessed all six named columns (`_id`, `id`, `title`, `text`, `topic`, `category`). Datasets generated outside the GLM pipeline (e.g., `test-small-*`) only have `_id` and `vector` — every other column access crashes.
+**Status:** ✅ FIXED
+
+**Fix Applied (`app/api/vectors/backfill/route.ts`, Python script):**
+- Each field access is now guarded: `to_string(row['id']) if 'id' in available_columns else doc_id`
+- Fallback chain: `id` → `_id`; `title` → `"Document {_id}"`; `text` → `""`; `topic` → `"general"`; `category` → `"uncategorized"`; `_id` → row index.
+
+**Regression guard:** After any change to the backfill Python script, run backfill against `test-small-20-dims-768` (only `_id` + `vector` columns). If it succeeds, the column-access logic is sound.
+
+---
+
+### Issue 20: Dataset Switching — kNN & Hybrid Must Track Dropdown Selection
+**Symptom:** Selecting a different dataset in the "Search Dataset" dropdown had no effect. Both kNN and Hybrid continued querying whichever dataset was previously backfilled to `lance-validation-test`.
+**Root Cause:** The `lance_vector` field mapping bakes a `lance_uri` at index-creation time; it cannot be updated in-place. Hybrid search always targeted `lance-validation-test` regardless of the selected dataset, and while kNN had a Python-fallback path that respected the selection, Hybrid had none.
+**Status:** ✅ FIXED — End-to-end validated
+
+**Fix Applied (two files):**
+
+1. **`app/api/vectors/backfill/route.ts`:**
+   - `BackfillRequest` extended with `forceRecreate?: boolean` and `dims?: number`.
+   - New `deleteESIndex()` helper — sends DELETE, ignores 404.
+   - `createESIndex()` now accepts `dims` parameter (was hardcoded 768).
+   - POST handler: when `forceRecreate` is true, DELETE the index before PUT (required because `lance_uri` is immutable).
+   - Python cache (`/tmp/lance-cache/`) cleared after successful bulk indexing.
+
+2. **`features/live-demo/ui/live-demo.tsx`:**
+   - Added `isBackfilling` state and `prevDatasetRef` (useRef).
+   - Dataset-switch `useEffect`: skips initial mount (`prevDatasetRef.current === null`), fires on every subsequent `selectedDataset` change. Posts to `/api/vectors/backfill` with `{ dataset, esIndex: 'lance-validation-test', createIndex: true, forceRecreate: true, dims: ds.dims }`.
+   - Blue spinner indicator ("Switching to …") shown while backfill is in progress.
+   - Search button disabled (`isLoading || isBackfilling`) during backfill.
+
+**End-to-end validation (Playwright):**
+- Selected `test-small-20-dims-768` (20 vectors, 768 dims) from dropdown.
+- Backfill POST → 200 OK.
+- kNN search → 20 candidates, top-5 all `test_doc_*` IDs. ✓
+- Hybrid search → Text 0 / Vector 5 / Fused 5, all `test_doc_*` IDs. RRF scores ~0.008. ✓
+- Both searches confirmed to operate exclusively against the switched dataset.
+
+**Regression guard:** After any change to the dataset-switch flow, repeat: (1) select a dataset with a different vector count than the current active dataset, (2) wait for backfill spinner to clear, (3) run both kNN and Hybrid — candidate count must match the selected dataset's vector count.
+
 ---
 
 ## Regression Test Checklist
@@ -476,7 +812,7 @@ Use this checklist for quick regression testing before committing changes.
 - [ ] Next.js running: `curl -s http://localhost:3000`
 - [ ] OSS credentials configured: `cat ~/.oss/credentials.json`
 
-### Quick API Tests (2 minutes)
+### Quick API Tests (3 minutes)
 ```bash
 # Test 1: List datasets
 curl -s http://localhost:3000/api/vectors/list | jq '.success'
@@ -485,7 +821,31 @@ curl -s http://localhost:3000/api/vectors/list | jq '.success'
 # Test 2: Fetch documents
 curl -s -X POST http://localhost:3000/api/vectors/documents \
   -H "Content-Type: application/json" \
-  -d '{"dataset":"vectors-10-dims-128-1769756222899"}' | jq '.success'
+  -d '{"dataset":"test-small-20-dims-768"}' | jq '.success'
+# Expected: true
+
+# Test 3: kNN Search
+curl -s -X POST http://localhost:3000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "k": 5}' | jq '.success'
+# Expected: true
+
+# Test 4: Hybrid Search
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "vector database", "k": 5}' | jq '.success'
+# Expected: true
+
+# Test 5: Get Metadata
+curl -s -X POST http://localhost:3000/api/vectors/metadata \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"test-small-20-dims-768"}' | jq '.success'
+# Expected: true
+
+# Test 6: Sample Vectors
+curl -s -X POST http://localhost:3000/api/vectors/sample \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"test-small-20-dims-768", "count": 5}' | jq '.success'
 # Expected: true
 ```
 
@@ -495,17 +855,51 @@ curl -s -X POST http://localhost:3000/api/vectors/documents \
 - [ ] DOCUMENTS button shows document list
 - [ ] ADD VECTORS button opens modal
 
-### Known Broken Features (Skip in regression)
-- ⚠️ Generate & Upload (works but slow - 30-60s)
+### Generate Dataset Test (slow — ~30-60s, run separately)
+```bash
+# Test 7: Generate Dataset (uses GLM + Jina APIs — rate-limited)
+# Run ONLY when verifying generate flow; skip in fast smoke runs.
+curl -s -X POST http://localhost:3000/api/vectors/generate \
+  -H "Content-Type: application/json" \
+  -d '{"vectors": 10, "dims": 768}' | jq .
+# Expected: {"success":true,"dataset":"vectors-10-dims-768-TIMESTAMP","vectors":10,"dims":768}
+# If Jina returns 429, the retry logic should back off and eventually succeed.
+# Failure after retries: check Jina rate-limit quota at https://app.jina.ai/pricing
+```
+
+### Hybrid Search 429-Resilience Test
+```bash
+# Run hybrid search twice rapidly to trigger Jina rate limit edge case
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "machine learning", "k": 5}' | jq '.success'
+# Immediately again:
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "deep learning neural networks", "k": 5}' | jq '.success'
+# Expected: both return true. Retry logic should handle transient 429.
+```
+
+### Dataset-Switch Smoke Test (after any search-path change)
+1. Open demo in browser → note the active dataset (shown in dropdown)
+2. Open dropdown → select a **different** dataset (prefer one with a different vector count, e.g. `test-small-20-dims-768` vs a generated 10-vector dataset)
+3. Wait for blue spinner ("Switching to …") to disappear
+4. Run kNN search — candidate count must equal the selected dataset's vector count
+5. Switch to Hybrid Search — all result IDs must belong to the selected dataset
+6. If either search returns results from the *previous* dataset, the backfill or cache-clear is broken
 
 ### All Interactive Features Validated ✅
 - ✅ Hybrid Search (Text + Vector Fusion) - Fully working
 - ✅ Show ES Request - Displays both BM25 and lance_knn queries
 - ✅ Show Vector - Loads and displays vector data from OSS
-- ✅ Show Doc - Displays original document details
+- ✅ Show Doc - Displays original document details WITH FULL TEXT (fixed)
 - ✅ Try Again - Returns to search confirmation dialog
 - ✅ Performance Timeline - Shows breakdown of all phases
 - ✅ Performance Insights - Displays optimization suggestions
+- ✅ **Sample Documents** - Shows up to 10 documents with all fields (PK, ID, title, text, topic, category)
+- ✅ **Backfill to ES** - Creates ES index with lance_vector field pointing to OSS, with progress bar
+- ✅ **Modal z-index Fix** - Documents modal properly layered above main page (z-100)
+- ✅ **Dataset Switching** - Dropdown selection triggers forceRecreate backfill; both kNN and Hybrid search the switched dataset
 
 ---
 
@@ -626,6 +1020,23 @@ es-lance-demo/
 
 ## Change Log
 
+### 2026-02-01: LanceDB API Migration Complete
+- ✅ **NEW: Migrated from `lance` to `lancedb` package (>= 0.27)**
+- ✅ **NEW: Fixed LanceDB table creation format** - Changed from dict-of-lists to list-of-dicts
+- ✅ **NEW: Fixed dimension alignment** - Jina embeddings use 768 dims (not configurable)
+- ✅ **NEW: Updated frontend vector generation** - Random vectors now 768 dims to match dataset
+- ✅ **NEW: Fixed CORS configuration** - Python backend allows both ports 3000 and 3001
+- ✅ **NEW: Validated kNN search** - Returns proper results with scores, distances, timing
+- ✅ **NEW: Validated Hybrid Search** - RRF fusion working with text+vector search
+- ✅ **NEW: Python FastAPI backend** - SSE streaming for dataset generation progress
+- ✅ **NEW: Dataset generation validation** - 10 vectors, 768 dims, 39KB uploaded to OSS
+
+**Files Modified:**
+- `backend/services/lance.py` - LanceDB table creation fix
+- `backend/main.py` - CORS configuration for ports 3000/3001
+- `features/live-demo/ui/live-demo.tsx` - Vector dimension fix (768 dims)
+- `app/api/search/route.ts` - Python script structure fix
+
 ### 2026-01-31: Major Updates
 - ✅ Created `starter_project.sh` for one-command stack startup
 - ✅ Fixed OSS credentials loading (lazy initialization from `~/.oss/credentials.json`)
@@ -639,6 +1050,159 @@ es-lance-demo/
 - ✅ Added comprehensive E2E test procedures
 - ✅ Added Playwright MCP test examples
 - ✅ Validated all UI interactive features (Show ES Request, Show Vector, Show Doc, Try Again, Performance Timeline)
+
+---
+
+## OpenTelemetry Tracing Validation
+
+### Overview
+OpenTelemetry tracing is implemented for kNN and hybrid search operations. Traces are exported directly to Elasticsearch (no APM Server required) and viewable in Kibana.
+
+### Trace Architecture
+```
+Next.js App → OTEL SDK → Custom ES Exporter → Elasticsearch (traces-lance-*) → Kibana
+```
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `lib/tracing.ts` | OTEL SDK initialization with ES exporter |
+| `lib/es-trace-exporter.ts` | Custom SpanExporter to Elasticsearch |
+| `lib/tracing-utils.ts` | Helper functions for creating spans |
+| `instrumentation.ts` | Next.js instrumentation hook |
+
+### Span Hierarchy
+
+**kNN Search (`lance.search.knn`)**
+```
+lance.search.knn (root)
+├── elasticsearch.search.knn (ES query)
+└── lance.search.python (Python subprocess timing)
+```
+
+**Hybrid Search (`lance.search.hybrid`)**
+```
+lance.search.hybrid (root)
+├── jina.embedding.generate
+├── elasticsearch.search.bm25 (text search)
+├── elasticsearch.search.knn (vector search)
+└── search.fusion.rrf (RRF fusion)
+```
+
+### OTEL Test 1: Verify Trace Index Setup
+```bash
+# Check trace index template exists
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/_index_template/traces-lance-template" | jq '.index_templates[0].name'
+# Expected: "traces-lance-template"
+
+# Check trace index exists
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/_cat/indices/traces-lance-*?v"
+# Expected: Shows traces-lance-* index with document count
+```
+
+### OTEL Test 2: kNN Search Generates Traces
+```bash
+# Execute kNN search
+curl -s -X POST http://localhost:3000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "k": 5}' | jq '.traceId'
+# Expected: Returns a traceId (e.g., "abc123...")
+
+# Verify trace in ES (wait 2-3 seconds for batch export)
+sleep 3
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/traces-lance-*/_search?size=1" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"match":{"span.name":"lance.search.knn"}}}' | jq '.hits.total.value'
+# Expected: >= 1
+```
+
+### OTEL Test 3: Hybrid Search Generates Traces
+```bash
+# Execute hybrid search
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "vector database", "k": 5}' | jq '.traceId'
+# Expected: Returns a traceId
+
+# Verify trace spans
+sleep 3
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/traces-lance-*/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"match":{"span.name":"lance.search.hybrid"}}}' | jq '.hits.total.value'
+# Expected: >= 1
+```
+
+### OTEL Test 4: Verify Span Attributes
+```bash
+# Check span has required attributes
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/traces-lance-*/_search?size=1" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"match":{"span.name":"lance.search.knn"}}}' | jq '.hits.hits[0]._source.attributes'
+# Expected attributes:
+# - http.method: POST
+# - http.url: /api/search
+# - search.k: 5
+# - search.dataset: <dataset_name>
+```
+
+### OTEL Test 5: Kibana Traces Visualization (Playwright MCP)
+```javascript
+// 1. Navigate to Kibana Discover
+mcp__playwright__browser_navigate?url=http://localhost:5601/app/discover
+
+// 2. Select "Lance Traces" data view
+mcp__playwright__browser_click?ref=<DATA_VIEW_SELECTOR>
+mcp__playwright__browser_click?ref=<LANCE_TRACES_OPTION>
+
+// 3. Verify traces visible
+// Expected: Documents with fields:
+//   - @timestamp
+//   - trace.id
+//   - span.name
+//   - span.duration_ms
+//   - service.name: "lance-demo"
+```
+
+### OTEL Test 6: Trace Parent-Child Relationships
+```bash
+# Get a hybrid search trace
+TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "test", "k": 3}' | jq -r '.traceId')
+
+sleep 3
+
+# Verify multiple spans with same trace ID
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/traces-lance-*/_search" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":{\"term\":{\"trace.id\":\"$TRACE_ID\"}}}" | jq '.hits.total.value'
+# Expected: >= 2 (root span + child spans)
+```
+
+### Regression Test: No Tracing Overhead Impact
+```bash
+# Ensure search still completes in reasonable time (< 5 seconds)
+time curl -s -X POST http://localhost:3000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "test", "k": 5}' > /dev/null
+# Expected: real time < 5s
+```
+
+### Tracing Validation Checklist
+- [ ] Trace index template created (`traces-lance-template`)
+- [ ] Traces exported to `traces-lance-*` index
+- [ ] kNN search creates `lance.search.knn` spans
+- [ ] Hybrid search creates `lance.search.hybrid` spans
+- [ ] Child spans include: `jina.embedding.generate`, `elasticsearch.search.bm25`, `elasticsearch.search.knn`, `search.fusion.rrf`
+- [ ] Spans have correct attributes (http.method, search.k, etc.)
+- [ ] Traces visible in Kibana Discover with "Lance Traces" data view
+- [ ] No significant performance regression from tracing
 
 ---
 

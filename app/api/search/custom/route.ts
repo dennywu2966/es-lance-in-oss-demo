@@ -1,3 +1,4 @@
+import { ES_AUTH as CONFIG_ES_AUTH, ES_SECURITY_ENABLED } from "@/entities/search/model/config";
 import { NextRequest, NextResponse } from "next/server";
 
 interface CustomSearchRequest {
@@ -32,16 +33,20 @@ export async function POST(req: NextRequest) {
     }
 
     const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-    const ES_AUTH = Buffer.from('elastic:mdNf7J+HVTB33syeww7i').toString('base64');
+    const ES_AUTH = CONFIG_ES_AUTH;
     const ES_INDEX = esIndex || process.env.ES_INDEX || 'lance-validation-test';
 
     // Execute the custom query against Elasticsearch
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (ES_SECURITY_ENABLED) {
+      headers['Authorization'] = `Basic ${ES_AUTH}`;
+    }
+
     const response = await fetch(`${ES_HOST}/${ES_INDEX}/_search`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${ES_AUTH}`,
-      },
+      headers,
       body: JSON.stringify(query),
     });
 

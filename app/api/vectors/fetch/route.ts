@@ -51,7 +51,7 @@ for var in list(os.environ.keys()):
         del os.environ[var]
 
 import oss2
-import lance
+import lancedb
 
 # OSS credentials (from environment)
 auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
@@ -85,12 +85,18 @@ for obj in result.object_list:
 
 print(f"Downloaded {downloaded} files", file=sys.stderr, flush=True)
 
-# Open Lance dataset - use temp_dir directly since files are already there
-dataset = lance.dataset(temp_dir)
+# Open Lance dataset using LanceDB (new API)
+db = lancedb.connect(temp_dir)
 
-# Query for the specific document by _id - get all fields
-query_table = dataset.to_table(columns=["_id", "id", "title", "text", "topic", "category", "vector"])
-query_data = query_table.to_pydict()
+# Get table names and open the first one
+tables = db.list_tables()
+if not tables:
+    raise Exception("No tables found in LanceDB database")
+table = db.open_table(tables[0])
+
+# Load all data to pandas dataframe
+df = table.to_pandas()
+query_data = df.to_dict('list')
 
 # Find the document
 result = None

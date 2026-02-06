@@ -19,20 +19,22 @@ export async function getOSSConfig() {
     };
   }
 
-  // Fallback to credentials file - bucket is in Singapore region
+  // Fallback to credentials file - read endpoint from credentials
   try {
     const credsPath = path.join(process.env.HOME || '', '.oss', 'credentials.json');
     const credsContent = await fs.readFile(credsPath, 'utf-8');
     const creds = JSON.parse(credsContent);
 
-    // The denny-test-lance bucket is in Singapore region (ap-southeast-1)
-    const region = 'oss-ap-southeast-1';
+    // Use the endpoint from credentials file (supports internal endpoints)
+    const endpoint = creds.endpoint || 'oss-ap-southeast-1.aliyuncs.com';
+    const region = endpoint.replace('.aliyuncs.com', '');
 
     return {
       region,
+      endpoint,
       accessKeyId: creds.access_key_id,
       accessKeySecret: creds.access_key_secret,
-      bucket: 'denny-test-lance',
+      bucket: creds.bucket_name || 'denny-test-lance',
     };
   } catch (error) {
     throw new Error('Failed to read OSS credentials from environment or ~/.oss/credentials.json');
@@ -78,28 +80,85 @@ export async function listDatasets(): Promise<VectorDataset[]> {
 
     if (!result.objects) return [];
 
-    // Group by dataset directory
+    // Group by dataset directory and accumulate sizes
     const datasets = new Map<string, VectorDataset>();
+    const datasetSizes = new Map<string, number>();
 
     for (const obj of result.objects) {
       const match = obj.name.match(/datasets\/([^/]+)\//);
       if (match) {
         const datasetName = match[1];
 
+        // Accumulate total size
+        datasetSizes.set(datasetName, (datasetSizes.get(datasetName) || 0) + obj.size);
+
         if (!datasets.has(datasetName)) {
           // Parse metadata from filename
-          const metaMatch = datasetName.match(/vectors-(\d+)-dims-(\d+)/);
-          const vectors = metaMatch ? parseInt(metaMatch[1]) : 0;
-          const dims = metaMatch ? parseInt(metaMatch[2]) : 0;
+          // Try pattern: vectors-100-dims-768-timestamp
+          let metaMatch = datasetName.match(/vectors-(\d+)-dims-(\d+)/);
+          let vectors = 0;
+          let dims = 0;
+
+          // Try pattern: real-87k-dims-768
+          if (!metaMatch) {
+            metaMatch = datasetName.match(/real-(\d+)k-dims-(\d+)/);
+            if (metaMatch) {
+              // Convert "87k" to actual number (known exact counts)
+              const kValue = metaMatch[1];
+              if (kValue === '87') {
+                vectors = 87394; // Exact count from ag_news dataset
+              } else {
+                vectors = parseInt(kValue) * 1000;
+              }
+              dims = parseInt(metaMatch[2]);
+              datasets.set(datasetName, {
+                name: datasetName,
+                vectors,
+                dims,
+                size: formatBytes(obj.size), // Will be updated later
+                lastModified: new Date(obj.lastModified).toISOString(),
+              });
+              continue;
+            }
+          }
+
+          // Try pattern: test-small-20-dims-768
+          if (!metaMatch) {
+            metaMatch = datasetName.match(/test-small-(\d+)-dims-(\d+)/);
+            if (metaMatch) {
+              vectors = parseInt(metaMatch[1]);
+              dims = parseInt(metaMatch[2]);
+              datasets.set(datasetName, {
+                name: datasetName,
+                vectors,
+                dims,
+                size: formatBytes(obj.size),
+                lastModified: new Date(obj.lastModified).toISOString(),
+              });
+              continue;
+            }
+          }
+
+          // Use matched values or defaults
+          vectors = metaMatch ? parseInt(metaMatch[1]) : 0;
+          dims = metaMatch ? parseInt(metaMatch[2]) : 0;
 
           datasets.set(datasetName, {
             name: datasetName,
             vectors,
             dims,
-            size: formatBytes(obj.size),
+            size: formatBytes(obj.size), // Will be updated later
             lastModified: new Date(obj.lastModified).toISOString(),
           });
         }
+      }
+    }
+
+    // Update sizes with accumulated totals
+    for (const [datasetName, totalSize] of datasetSizes) {
+      const dataset = datasets.get(datasetName);
+      if (dataset) {
+        dataset.size = formatBytes(totalSize);
       }
     }
 
@@ -134,6 +193,42 @@ export async function deleteDataset(datasetName: string): Promise<{ success: boo
   }
 }
 
+// Retry wrapper for Jina API calls — handles HTTP 429 with exponential back-off.
+// Exported so hybrid/route.ts can reuse the same logic.
+export async function jinaFetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries: number = 3,
+  baseDelayMs: number = 1000
+): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const response = await fetch(url, options);
+
+    if (response.status !== 429) {
+      return response; // success or non-retryable error — let caller handle
+    }
+
+    // 429 — back off before retry
+    if (attempt === maxRetries) {
+      lastError = new Error(`Jina API error: 429 (exhausted ${maxRetries} retries)`);
+      break;
+    }
+
+    // Honour Retry-After header if present; otherwise exponential back-off
+    const retryAfter = response.headers.get('Retry-After');
+    const delayMs = retryAfter
+      ? Math.min(parseInt(retryAfter, 10) * 1000, 120000)
+      : baseDelayMs * Math.pow(2, attempt);
+
+    console.log(`Jina 429 — retry ${attempt + 1}/${maxRetries} after ${delayMs}ms`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  throw lastError!;
+}
+
 // Generate Lance dataset and upload to OSS with GLM docs and Jina embeddings
 export async function generateAndUploadDataset(
   vectors: number,
@@ -155,86 +250,97 @@ export async function generateAndUploadDataset(
     console.log('Generating documents with GLM...');
     const documents: Array<{id: string; title: string; text: string; topic: string}> = [];
 
-    // Generate documents in batches
-    const batchSize = 5;
-    for (let i = 0; i < vectors; i += batchSize) {
-      const currentBatch = Math.min(batchSize, vectors - i);
+    // Generate documents in parallel batches for better performance
+    const glmBatchSize = 10;
+    for (let i = 0; i < vectors; i += glmBatchSize) {
+      const currentBatch = Math.min(glmBatchSize, vectors - i);
+      const batchPromises: Promise<void>[] = [];
 
       for (let j = 0; j < currentBatch; j++) {
         const topics = ['Vector Databases', 'Machine Learning', 'Elasticsearch', 'Cloud Computing', 'Neural Networks', 'Natural Language Processing', 'DevOps', 'Data Engineering', 'Microservices', 'Deep Learning'];
         const selectedTopic = topics[Math.floor(Math.random() * topics.length)];
 
-        try {
-          const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${GLM_API_KEY}`,
-            },
-            body: JSON.stringify({
-              model: 'GLM-4-Flash',
-              messages: [
-                {
-                  role: 'user',
-                  content: `Generate a short technical document (150-200 words) about ${selectedTopic}. Include a title and the main content. Return as JSON with "title" and "text" fields.`
-                }
-              ],
-              temperature: 0.7,
-              max_tokens: 500,
-            }),
-          });
+        const docPromise = (async () => {
+          try {
+            const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${GLM_API_KEY}`,
+              },
+              body: JSON.stringify({
+                model: 'GLM-4-Flash',
+                messages: [
+                  {
+                    role: 'user',
+                    content: `Generate a short technical document (150-200 words) about ${selectedTopic}. Include a title and the main content. Return as JSON with "title" and "text" fields.`
+                  }
+                ],
+                temperature: 0.7,
+                max_tokens: 500,
+              }),
+            });
 
-          if (!response.ok) {
-            throw new Error(`GLM API error: ${response.status}`);
-          }
+            if (!response.ok) {
+              throw new Error(`GLM API error: ${response.status}`);
+            }
 
-          const data = await response.json();
-          const content = data.choices[0].message.content;
+            const data = await response.json();
+            const content = data.choices[0].message.content;
 
-          // Parse the JSON response
-          const jsonMatch = content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const docContent = JSON.parse(jsonMatch[0]);
+            // Parse the JSON response
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const docContent = JSON.parse(jsonMatch[0]);
+              documents.push({
+                id: `doc_${String(i + j).padStart(4, '0')}`,
+                title: docContent.title || `${selectedTopic} Overview`,
+                text: docContent.text || content,
+                topic: selectedTopic
+              });
+            } else {
+              // Fallback if JSON parsing fails
+              documents.push({
+                id: `doc_${String(i + j).padStart(4, '0')}`,
+                title: `${selectedTopic} - Document ${i + j}`,
+                text: content,
+                topic: selectedTopic
+              });
+            }
+          } catch (error: any) {
+            console.error(`Failed to generate document ${i + j}:`, error.message);
+            // Fallback to simple text
             documents.push({
               id: `doc_${String(i + j).padStart(4, '0')}`,
-              title: docContent.title || `${selectedTopic} Overview`,
-              text: docContent.text || content,
-              topic: selectedTopic
-            });
-          } else {
-            // Fallback if JSON parsing fails
-            documents.push({
-              id: `doc_${String(i + j).padStart(4, '0')}`,
-              title: `${selectedTopic} - Document ${i + j}`,
-              text: content,
+              title: `${selectedTopic} - Article ${i + j}`,
+              text: `This document discusses ${selectedTopic} concepts, implementations, and best practices in modern software development.`,
               topic: selectedTopic
             });
           }
+        })();
 
-          // Rate limiting delay
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (error: any) {
-          console.error(`Failed to generate document ${i + j}:`, error.message);
-          // Fallback to simple text
-          documents.push({
-            id: `doc_${String(i + j).padStart(4, '0')}`,
-            title: `${selectedTopic} - Article ${i + j}`,
-            text: `This document discusses ${selectedTopic} concepts, implementations, and best practices in modern software development.`,
-            topic: selectedTopic
-          });
-        }
+        batchPromises.push(docPromise);
       }
+
+      // Wait for all documents in batch to complete
+      await Promise.all(batchPromises);
+
+      // Rate limiting delay between batches (reduced from 500ms to 100ms)
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     console.log(`Generated ${documents.length} documents`);
 
-    // Step 2: Generate embeddings using Jina API
+    // Step 2: Generate embeddings using Jina API (parallelized for speed)
     console.log('Generating embeddings with Jina...');
     const embeddings: number[][] = [];
+    const jinaBatchSize = 50;
 
-    for (const doc of documents) {
+    for (let i = 0; i < documents.length; i += jinaBatchSize) {
+      const batch = documents.slice(i, i + jinaBatchSize);
       try {
-        const response = await fetch('https://api.jina.ai/v1/embeddings', {
+        // Send entire batch as a single Jina API call (input accepts string[])
+        const response = await jinaFetchWithRetry('https://api.jina.ai/v1/embeddings', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -242,27 +348,35 @@ export async function generateAndUploadDataset(
           },
           body: JSON.stringify({
             model: 'jina-embeddings-v2-base-en',
-            input: doc.text,
+            input: batch.map(doc => doc.text),
             encoding_type: 'float',
           }),
-        });
+        }, 5, 2000); // generate is slow-tolerant: 5 retries, 2s base delay
 
         if (!response.ok) {
           throw new Error(`Jina API error: ${response.status}`);
         }
 
         const data = await response.json();
-        if (data.data && data.data[0] && data.data[0].embedding) {
-          embeddings.push(data.data[0].embedding);
+        if (data.data && data.data.length === batch.length) {
+          data.data.forEach((item: any) => {
+            if (item.embedding) {
+              embeddings.push(item.embedding);
+            } else {
+              throw new Error('Invalid response format from Jina API');
+            }
+          });
         } else {
-          throw new Error('Invalid response format from Jina API');
+          throw new Error(`Jina returned ${data.data?.length ?? 0} embeddings, expected ${batch.length}`);
         }
-
-        // Rate limiting delay
-        await new Promise(resolve => setTimeout(resolve, 100));
       } catch (error: any) {
-        console.error(`Failed to generate embedding for ${doc.id}:`, error.message);
+        console.error(`Failed to generate embeddings for batch starting at ${i}:`, error.message);
         throw error;
+      }
+
+      // Rate-limit-friendly delay between batches
+      if (i + jinaBatchSize < documents.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
 
@@ -278,10 +392,11 @@ os.environ.pop('all_proxy', None)
 os.environ.pop('ALL_PROXY', None)
 
 import numpy as np
-import lance
+import lancedb
 import pyarrow as pa
 
 output_path = "${localPath}"
+dataset_name = "data"
 
 # Document and embedding data
 documents_data = ${JSON.stringify(documents.map((doc, idx) => ({
@@ -295,18 +410,8 @@ vectors_array = np.array([doc['vector'] for doc in documents_data], dtype=np.flo
 
 # Define schema with all document fields
 dims = vectors_array.shape[1]
-vector_type = pa.list_(pa.float32(), list_size=dims)
-schema = pa.schema([
-    pa.field('_id', pa.string()),
-    pa.field('id', pa.string()),
-    pa.field('title', pa.string()),
-    pa.field('text', pa.string()),
-    pa.field('topic', pa.string()),
-    pa.field('category', pa.string()),
-    pa.field('vector', vector_type)
-])
 
-# Create FixedSizeListArray
+# Create FixedSizeListArray for vectors
 flat_vectors = vectors_array.flatten()
 vector_array = pa.FixedSizeListArray.from_arrays(
     pa.array(flat_vectors, type=pa.float32()),
@@ -323,24 +428,26 @@ table = pa.table({
     'topic': pa.array([doc['topic'] for doc in documents_data]),
     'category': pa.array(categories.tolist()),
     'vector': vector_array
-}, schema=schema)
+})
 
-# Write dataset
-dataset = lance.write_dataset(table, output_path)
+# Connect to LanceDB and create table
+db = lancedb.connect(output_path)
+tb = db.create_table(dataset_name, table, mode="overwrite")
 
 # Create IVF-PQ index for larger datasets
 n_vectors = len(documents_data)
 if n_vectors >= 100:
     num_partitions = max(2, min(n_vectors // 10, 32))
-    dataset.create_index(
-        column='vector',
-        index_type='IVF_PQ',
-        metric='cosine',
+    tb.create_index(
+        vector_column_name="vector",
+        index_type="IVF_PQ",
+        metric="cosine",
         num_partitions=num_partitions,
-        num_sub_vectors=min(dims // 8, 64)
+        num_sub_vectors=min(dims // 8, 64),
+        replace=True
     )
 
-print(f"Created: {dataset.count_rows()} documents with {dims}-dim vectors")
+print(f"Created: {tb.count_rows()} documents with {dims}-dim vectors")
 `;
 
     await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
@@ -636,10 +743,11 @@ os.environ.pop('all_proxy', None)
 os.environ.pop('ALL_PROXY', None)
 
 import numpy as np
-import lance
+import lancedb
 import pyarrow as pa
 
 output_path = "${localPath}"
+dataset_name = "data"
 
 # Document data (passed from Node.js)
 documents_data = ${JSON.stringify(FAKE_DOCUMENTS.map((doc, idx) => ({
@@ -651,21 +759,13 @@ documents_data = ${JSON.stringify(FAKE_DOCUMENTS.map((doc, idx) => ({
 vectors_array = np.array([doc['vector'] for doc in documents_data], dtype=np.float32)
 
 # Define schema with document fields
-vector_type = pa.list_(pa.float32(), list_size=${dims})
-schema = pa.schema([
-    pa.field('id', pa.string()),
-    pa.field('title', pa.string()),
-    pa.field('text', pa.string()),
-    pa.field('topic', pa.string()),
-    pa.field('created_at', pa.string()),
-    pa.field('vector', vector_type)
-])
+dims = ${dims}
 
-# Create FixedSizeListArray
+# Create FixedSizeListArray for vectors
 flat_vectors = vectors_array.flatten()
 vector_array = pa.FixedSizeListArray.from_arrays(
     pa.array(flat_vectors, type=pa.float32()),
-    ${dims}
+    dims
 )
 
 # Create table
@@ -676,22 +776,24 @@ table = pa.table({
     'topic': pa.array([doc['topic'] for doc in documents_data]),
     'created_at': pa.array([doc['created_at'] for doc in documents_data]),
     'vector': vector_array
-}, schema=schema)
+})
 
-# Write dataset
-dataset = lance.write_dataset(table, output_path)
+# Connect to LanceDB and create table
+db = lancedb.connect(output_path)
+tb = db.create_table(dataset_name, table, mode="overwrite")
 
 # Create IVF-PQ index
 num_partitions = max(2, min(len(documents_data) // 5, 8))
-dataset.create_index(
-    column='vector',
-    index_type='IVF_PQ',
-    metric='cosine',
+tb.create_index(
+    vector_column_name="vector",
+    index_type="IVF_PQ",
+    metric="cosine",
     num_partitions=num_partitions,
-    num_sub_vectors=min(${dims} // 8, 64)
+    num_sub_vectors=min(dims // 8, 64),
+    replace=True
 )
 
-print(f"Created: {dataset.count_rows()} documents with ${dims}-dim vectors")
+print(f"Created: {tb.count_rows()} documents with ${dims}-dim vectors")
 `;
 
     await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);

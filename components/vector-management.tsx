@@ -22,7 +22,7 @@ import {
   Tag,
   Upload,
 } from "lucide-react";
-import { slideUp, staggerContainer } from "@/lib/animations";
+import { slideUp, staggerContainer } from "@/shared/lib/animations";
 
 interface Dataset {
   name: string;

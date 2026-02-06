@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { Code, Copy, Check } from "lucide-react";
-import { codeExamples } from "@/lib/data";
-import { slideUp } from "@/lib/animations";
+import { codeExamples } from "@/shared/lib/data";
+import { slideUp } from "@/shared/lib/animations";
 import { useState } from "react";
 
 export function CodePreview() {

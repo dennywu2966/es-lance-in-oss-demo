@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { listDatasets } from "@/lib/oss-client";
 
+// Cache for 60 seconds - datasets list doesn't change frequently
+export const revalidate = 60;
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const datasets = await listDatasets();

@@ -34,9 +34,10 @@ NEXTJS_DIR="$SCRIPT_DIR"
 # Ports
 ES_PORT=9200
 NEXTJS_PORT=3000
+PYTHON_PORT=8000
 
 # ES Configuration
-ES_PASSWORD="Summer11"
+ES_PASSWORD="8jP4o9dzi=b+cRvBHiuw"
 ES_USER="elastic"
 ES_HOST="127.0.0.1"
 
@@ -87,6 +88,11 @@ is_es_ready() {
     curl -s -k -u "$ES_USER:$ES_PASSWORD" "https://$ES_HOST:$ES_PORT/_cluster/health" > /dev/null 2>&1
 }
 
+# Check if Python backend is responding
+is_python_ready() {
+    curl -s "http://localhost:$PYTHON_PORT/health" > /dev/null 2>&1
+}
+
 check_prerequisites() {
     log_info "Checking prerequisites..."
 
@@ -122,6 +128,19 @@ check_prerequisites() {
         cd "$NEXTJS_DIR"
         npm install
         cd "$SCRIPT_DIR"
+    fi
+
+    # Check Python
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python 3 not found. Please install Python 3 first."
+        ((errors++))
+    fi
+
+    # Check Python backend dependencies
+    if [ -d "$SCRIPT_DIR/backend" ]; then
+        if ! python3 -c "import fastapi, uvicorn, oss2, lance" 2>/dev/null; then
+            log_warning "Python backend dependencies not fully installed. Run 'cd backend && pip install -r requirements.txt' if needed."
+        fi
     fi
 
     if [ $errors -gt 0 ]; then
@@ -268,6 +287,56 @@ start_nextjs() {
     cd "$SCRIPT_DIR"
 }
 
+start_python_backend() {
+    log_info "Checking Python backend status..."
+
+    # Check if Python backend is already running on port 8000
+    if is_port_in_use $PYTHON_PORT && is_python_ready; then
+        log_success "Python backend is already running on port $PYTHON_PORT"
+        return 0
+    fi
+
+    # Port is in use but not responding - kill it
+    if is_port_in_use $PYTHON_PORT; then
+        log_warning "Port $PYTHON_PORT is in use but Python backend not responding - killing existing process..."
+        fuser -k $PYTHON_PORT/tcp 2>/dev/null || true
+        sleep 2
+    fi
+
+    log_info "Starting Python FastAPI backend..."
+
+    # Check if backend directory exists
+    if [ ! -d "$SCRIPT_DIR/backend" ]; then
+        log_error "Backend directory not found at $SCRIPT_DIR/backend. Skipping Python backend."
+        return 1
+    fi
+
+    cd "$SCRIPT_DIR/backend"
+
+    # Start Python backend in background
+    nohup python3 main.py > /tmp/es-lance-demo-python.log 2>&1 &
+    PYTHON_PID=$!
+
+    log_info "Waiting for Python backend to be ready..."
+
+    # Wait for Python backend to be ready (up to 15 seconds)
+    for i in {1..15}; do
+        if is_python_ready; then
+            log_success "Python backend is ready!"
+            cd "$SCRIPT_DIR"
+            return 0
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo ""
+
+    log_warning "Python backend is taking longer than expected. Check logs:"
+    echo "  tail -50 /tmp/es-lance-demo-python.log"
+    log_info "Python backend PID: $PYTHON_PID"
+    cd "$SCRIPT_DIR"
+}
+
 verify_stack() {
     log_info "Verifying stack status..."
 
@@ -289,6 +358,13 @@ verify_stack() {
     else
         log_warning "Next.js: Not responding yet (check $NEXTJS_LOG_FILE)"
     fi
+
+    # Check Python backend
+    if is_python_ready; then
+        log_success "Python Backend: Running on port $PYTHON_PORT"
+    else
+        log_warning "Python Backend: Not responding yet (check /tmp/es-lance-demo-python.log)"
+    fi
 }
 
 print_access_info() {
@@ -298,28 +374,43 @@ print_access_info() {
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo -e "${BLUE}Access URLs:${NC}"
-    echo "  Next.js Demo:  http://localhost:$NEXTJS_PORT"
-    echo ""
-    echo "  Elasticsearch: https://$ES_HOST:$ES_PORT"
-    echo "                Username: $ES_USER"
-    echo "                Password: $ES_PASSWORD"
+    echo "  Next.js Demo:     http://localhost:$NEXTJS_PORT"
+    echo "  Python Backend:   http://localhost:$PYTHON_PORT"
+    echo "  Elasticsearch:    https://$ES_HOST:$ES_PORT"
+    echo "                    Username: $ES_USER"
+    echo "                    Password: $ES_PASSWORD"
     echo ""
     echo -e "${BLUE}To stop the stack:${NC}"
     echo "  # Stop ES"
     echo "  cd $ES_DIST_DIR"
     echo "  kill \$(cat elasticsearch.pid)"
     echo ""
+    echo "  # Stop Python Backend"
+    echo "  fuser -k $PYTHON_PORT/tcp"
+    echo ""
     echo "  # Stop Next.js"
     echo "  fuser -k $NEXTJS_PORT/tcp"
     echo ""
     echo -e "${BLUE}Logs:${NC}"
-    echo "  ES:     $ES_DIST_DIR/logs/elasticsearch.log"
-    echo "  NextJS: $NEXTJS_LOG_FILE"
+    echo "  ES:       $ES_DIST_DIR/logs/elasticsearch.log"
+    echo "  NextJS:   $NEXTJS_LOG_FILE"
+    echo "  Python:   /tmp/es-lance-demo-python.log"
     echo ""
     echo -e "${BLUE}API Endpoints:${NC}"
-    echo "  Vector list:    http://localhost:$NEXTJS_PORT/api/vectors"
-    echo "  kNN search:     http://localhost:$NEXTJS_PORT/api/search"
-    echo "  Generate:       POST http://localhost:$NEXTJS_PORT/api/vectors/generate"
+    echo "  Python Backend:"
+    echo "    Health check:  GET http://localhost:$PYTHON_PORT/health"
+    echo "    List datasets:  GET http://localhost:$PYTHON_PORT/api/v1/datasets"
+    echo "    Generate:       POST http://localhost:$PYTHON_PORT/api/v1/dataset/generate"
+    echo "    Job status:     GET http://localhost:$PYTHON_PORT/api/v1/dataset/status/{job_id}"
+    echo "    Job stream:     GET http://localhost:$PYTHON_PORT/api/v1/dataset/stream/{job_id}"
+    echo ""
+    echo "  Next.js (Legacy API - use Python backend instead):"
+    echo "    Vector list:    http://localhost:$NEXTJS_PORT/api/vectors"
+    echo "    kNN search:     http://localhost:$NEXTJS_PORT/api/search"
+    echo ""
+    echo "  Elasticsearch (Direct - for Lance plugin testing):"
+    echo "    kNN search:     POST https://$ES_HOST:$ES_PORT/lance-validation-test/_search"
+    echo "                    (with lance_knn query)"
     echo ""
 }
 
@@ -338,6 +429,9 @@ check_prerequisites
 
 # Start Elasticsearch
 start_elasticsearch
+
+# Start Python backend
+start_python_backend
 
 # Start Next.js
 start_nextjs

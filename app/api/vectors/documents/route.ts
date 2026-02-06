@@ -56,17 +56,29 @@ export async function POST(request: NextRequest) {
 
     // Download all files
     for (const obj of result.objects) {
-      const relativePath = obj.name.replace(`${datasetPath}/`, "");
+      // Skip objects without name property (common prefixes don't have name)
+      if (!('name' in obj) || !obj.name) continue;
+
+      const objectKey = obj.name;
+      const relativePath = objectKey.replace(`${datasetPath}/`, "");
       const localFilePath = `${tempDir}/${relativePath}`;
 
       // Ensure directory exists
       const dir = localFilePath.substring(0, localFilePath.lastIndexOf("/"));
       await fs.mkdir(dir, { recursive: true });
 
-      await client.get(obj.name, localFilePath);
+      await client.get(objectKey, localFilePath);
     }
 
-    // Read documents using Python
+    // Get OSS credentials to pass to Python
+    const ossConfig = await getClient().then(async (client) => {
+      // Read credentials file directly
+      const credsPath = `/home/denny/.oss/credentials.json`;
+      const credsContent = await fs.readFile(credsPath, 'utf-8');
+      return JSON.parse(credsContent);
+    });
+
+    // Read documents using Python with OSS credentials
     const pythonScript = `
 import os
 import sys
@@ -75,41 +87,80 @@ os.environ.pop('https_proxy', None)
 os.environ.pop('all_proxy', None)
 os.environ.pop('ALL_PROXY', None)
 
-import lance
+# Set OSS credentials for LanceDB
+os.environ['OSS_ACCESS_KEY_ID'] = '${ossConfig.access_key_id}'
+os.environ['OSS_ACCESS_KEY_SECRET'] = '${ossConfig.access_key_secret}'
+os.environ['OSS_ENDPOINT'] = '${ossConfig.endpoint}'
+os.environ['OSS_REGION'] = '${ossConfig.region}'
+
+import lancedb
+import pyarrow as pa
 
 dataset_path = "${tempDir}"
 limit = ${limit}
 
-# Open dataset
-dataset = lance.dataset(dataset_path)
+# Open database using LanceDB (new API)
+db = lancedb.connect(dataset_path)
+
+# Get table names - use table_names() which returns a simple list
+tables_response = db.list_tables()
+if isinstance(tables_response, list):
+    table_names = tables_response
+elif hasattr(tables_response, 'tables'):
+    table_names = tables_response.tables
+elif hasattr(tables_response, 'names'):
+    table_names = tables_response.names
+else:
+    table_names = list(tables_response)
+
+if not table_names:
+    raise Exception("No tables found in LanceDB database")
+
+# Open the first available table
+table = db.open_table(table_names[0])
 
 # Get total count
-total = dataset.count_rows()
+total = table.count_rows()
 
-# Load all documents (or limited number) - exclude vector field for display
-if limit > 0:
-    table = dataset.to_table(columns=['_id', 'id', 'title', 'text', 'topic', 'category'], limit=limit)
-else:
-    table = dataset.to_table(columns=['_id', 'id', 'title', 'text', 'topic', 'category'])
+# Load all documents and then slice if needed
+# Note: to_arrow() doesn't support columns or limit in new API
+arrow_table = table.to_arrow()
+data = arrow_table.to_pandas()
 
-# Convert to list of dicts
-documents = table.to_pydict()
+# Apply limit if specified
+if limit > 0 and limit < len(data):
+    data = data.head(limit)
 
+# Select only the columns we need (exclude vector which can be large)
+columns_needed = ['_id', 'id', 'title', 'text', 'topic', 'category']
+# Check which columns exist in the data
+available_columns = [col for col in columns_needed if col in data.columns]
+data = data[available_columns]
+
+# Convert pandas DataFrame to list of dicts
 result = []
-for i in range(len(documents['id'])):
-    # Helper function to convert PyArrow scalars
+for idx, row in data.iterrows():
+    # Helper function to convert pandas values safely
     def to_string(val):
-        if hasattr(val, 'as_py'):
-            return val.as_py()
+        if val is None:
+            return ''
+        if hasattr(val, 'item'):
+            return str(val.item())
         return str(val)
 
+    # Get value from row with fallback for missing columns
+    def get_val(column, default=''):
+        if column in row.index:
+            return to_string(row[column])
+        return default
+
     result.append({
-        '_id': to_string(documents['_id'][i]),
-        'id': to_string(documents['id'][i]),
-        'title': to_string(documents['title'][i]),
-        'text': to_string(documents['text'][i]),
-        'topic': to_string(documents['topic'][i]),
-        'category': to_string(documents['category'][i])
+        '_id': get_val('_id'),
+        'id': get_val('id', get_val('_id')),  # Fallback to _id if id doesn't exist
+        'title': get_val('title', ''),
+        'text': get_val('text', ''),
+        'topic': get_val('topic', 'general'),
+        'category': get_val('category', 'unknown')
     })
 
 # Output as JSON

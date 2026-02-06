@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ES_HOST, ES_AUTH, ES_SECURITY_ENABLED } from "@/entities/search/model/config";
+import { getTracer, SpanStatusCode, SpanKind, trace, context } from "@/lib/tracing";
+import { traceAsync } from "@/lib/tracing-utils";
+import { jinaFetchWithRetry } from "@/lib/oss-client";
 
 interface HybridSearchRequest {
   dataset?: string;
@@ -51,7 +55,7 @@ async function generateQueryEmbedding(queryText: string): Promise<number[]> {
     throw new Error('JINA_API_KEY environment variable is not set');
   }
 
-  const response = await fetch('https://api.jina.ai/v1/embeddings', {
+  const response = await jinaFetchWithRetry('https://api.jina.ai/v1/embeddings', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -77,32 +81,37 @@ async function generateQueryEmbedding(queryText: string): Promise<number[]> {
   }
 }
 
-// Perform BM25 text search
+// Perform BM25 text search (optionally filtered by dataset)
 async function performTextSearch(
   index: string,
   queryText: string,
-  size: number
+  size: number,
+  dataset?: string
 ): Promise<{ results: HybridSearchResult[]; totalHits: number }> {
-  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
-  const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
   // Ignore self-signed certificates for local ES
   const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (ES_SECURITY_ENABLED) {
+      headers['Authorization'] = `Basic ${ES_AUTH}`;
+    }
+
+    // Build query: wrap in bool filter when dataset is specified
+    const matchQuery = { match: { text: queryText } };
+    const query = dataset
+      ? { bool: { must: [matchQuery], filter: [{ term: { dataset } }] } }
+      : matchQuery;
+
     const response = await fetch(`${ES_HOST}/${index}/_search`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${ES_AUTH}`,
-      },
+      headers,
       body: JSON.stringify({
-        query: {
-          match: {
-            text: queryText,
-          },
-        },
+        query,
         size,
         _source: ['id', 'category', 'text'],
       }),
@@ -135,20 +144,22 @@ async function performVectorSearch(
   k: number,
   numCandidates: number
 ): Promise<{ results: HybridSearchResult[]; totalHits: number; profile?: any }> {
-  const ES_HOST = process.env.ES_HOST || 'https://127.0.0.1:9200';
-  const ES_AUTH = Buffer.from('elastic:Summer11').toString('base64');
 
   // Ignore self-signed certificates for local ES
   const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (ES_SECURITY_ENABLED) {
+      headers['Authorization'] = `Basic ${ES_AUTH}`;
+    }
+
     const response = await fetch(`${ES_HOST}/${index}/_search`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${ES_AUTH}`,
-      },
+      headers,
       body: JSON.stringify({
         profile: true,
         query: {
@@ -257,21 +268,40 @@ function rrfFusion(
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
   const timingBreakdown: TimingBreakdown[] = [];
-  let phaseStart = startTime;
 
-  try {
-    const body = await req.json() as HybridSearchRequest;
-    const {
-      dataset,
-      k = 10,
-      numCandidates = k * 2,
-      queryText = '',
-      queryVector,
-      textWeight = 0.5,
-      vectorWeight = 0.5,
-    } = body;
+  const tracer = getTracer();
 
-    const ES_INDEX = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
+  // Create root span for the entire hybrid search operation
+  const rootSpan = tracer.startSpan('lance.search.hybrid', {
+    kind: SpanKind.SERVER,
+    attributes: {
+      'http.method': 'POST',
+      'http.url': '/api/search/hybrid',
+      'search.type': 'hybrid',
+    },
+  });
+
+  return context.with(trace.setSpan(context.active(), rootSpan), async () => {
+    try {
+      const body = await req.json() as HybridSearchRequest;
+      const {
+        dataset,
+        k = 10,
+        numCandidates = k * 2,
+        queryText = '',
+        queryVector,
+        textWeight = 0.5,
+        vectorWeight = 0.5,
+      } = body;
+
+      const ES_INDEX = body.esIndex || process.env.ES_INDEX || 'lance-validation-test';
+
+      rootSpan.setAttribute('search.k', k);
+      rootSpan.setAttribute('search.num_candidates', numCandidates);
+      rootSpan.setAttribute('search.text_weight', textWeight);
+      rootSpan.setAttribute('search.vector_weight', vectorWeight);
+      rootSpan.setAttribute('es.index', ES_INDEX);
+      if (queryText) rootSpan.setAttribute('search.query_text', queryText.substring(0, 100));
 
     // If no query vector and no query text, we can't search
     if (!queryVector && !queryText) {
@@ -294,7 +324,17 @@ export async function POST(req: NextRequest) {
     if (queryText && !queryVector) {
       const embedStart = Date.now();
       try {
-        finalQueryVector = await generateQueryEmbedding(queryText);
+        finalQueryVector = await traceAsync(
+          'jina.embedding.generate',
+          async (embedSpan) => {
+            embedSpan.setAttribute('embedding.model', 'jina-embeddings-v2-base-en');
+            embedSpan.setAttribute('embedding.input_length', queryText.length);
+            const vector = await generateQueryEmbedding(queryText);
+            embedSpan.setAttribute('embedding.dimensions', vector.length);
+            return vector;
+          },
+          { kind: SpanKind.CLIENT }
+        );
         const embedDuration = Date.now() - embedStart;
         timingBreakdown.push({
           phase: 'Embedding Generation',
@@ -302,6 +342,8 @@ export async function POST(req: NextRequest) {
           startOffset: embedStart - startTime,
         });
       } catch (error: any) {
+        rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        rootSpan.end();
         return NextResponse.json(
           {
             success: false,
@@ -321,7 +363,19 @@ export async function POST(req: NextRequest) {
     // Perform text search if query text provided
     if (queryText) {
       const textSearchStart = Date.now();
-      const textSearch = await performTextSearch(ES_INDEX, queryText, k * 2);
+      const textSearch = await traceAsync(
+        'elasticsearch.search.bm25',
+        async (bm25Span) => {
+          bm25Span.setAttribute('es.index', ES_INDEX);
+          bm25Span.setAttribute('search.query_text', queryText.substring(0, 100));
+          bm25Span.setAttribute('search.size', k * 2);
+          const result = await performTextSearch(ES_INDEX, queryText, k * 2, dataset);
+          bm25Span.setAttribute('es.hits_count', result.results.length);
+          bm25Span.setAttribute('es.total_hits', result.totalHits);
+          return result;
+        },
+        { kind: SpanKind.CLIENT }
+      );
       const textSearchDuration = Date.now() - textSearchStart;
       textResults = textSearch.results;
       timingBreakdown.push({
@@ -331,11 +385,25 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Perform vector search if query vector provided or generated
+    // Perform vector search if query vector provided or generated (always via ES lance_knn)
     if (finalQueryVector) {
       const vectorSearchStart = Date.now();
       try {
-        const vectorSearch = await performVectorSearch(ES_INDEX, finalQueryVector, k, numCandidates);
+        const vectorSearch = await traceAsync(
+          'elasticsearch.search.knn',
+          async (knnSpan) => {
+            knnSpan.setAttribute('es.index', ES_INDEX);
+            knnSpan.setAttribute('search.k', k);
+            knnSpan.setAttribute('search.num_candidates', numCandidates);
+            knnSpan.setAttribute('search.vector_dimensions', finalQueryVector!.length);
+            const result = await performVectorSearch(ES_INDEX, finalQueryVector!, k, numCandidates);
+            knnSpan.setAttribute('es.hits_count', result.results.length);
+            knnSpan.setAttribute('es.total_hits', result.totalHits);
+            return result;
+          },
+          { kind: SpanKind.CLIENT }
+        );
+
         const vectorSearchDuration = Date.now() - vectorSearchStart;
         vectorResults = vectorSearch.results;
         esProfileData = vectorSearch.profile; // Store profile data for response
@@ -394,7 +462,19 @@ export async function POST(req: NextRequest) {
     // Perform fusion if both searches were performed
     if (queryText && finalQueryVector) {
       const fusionStart = Date.now();
-      fusionResults = rrfFusion(textResults, vectorResults, k, textWeight, vectorWeight);
+      fusionResults = await traceAsync(
+        'search.fusion.rrf',
+        async (fusionSpan) => {
+          fusionSpan.setAttribute('fusion.text_results', textResults.length);
+          fusionSpan.setAttribute('fusion.vector_results', vectorResults.length);
+          fusionSpan.setAttribute('fusion.text_weight', textWeight);
+          fusionSpan.setAttribute('fusion.vector_weight', vectorWeight);
+          const fused = rrfFusion(textResults, vectorResults, k, textWeight, vectorWeight);
+          fusionSpan.setAttribute('fusion.output_count', fused.length);
+          return fused;
+        },
+        { kind: SpanKind.INTERNAL }
+      );
       const fusionDuration = Date.now() - fusionStart;
       timingBreakdown.push({
         phase: 'RRF Fusion',
@@ -409,6 +489,15 @@ export async function POST(req: NextRequest) {
 
     const latency = Date.now() - startTime;
 
+    // Set final span attributes
+    rootSpan.setAttribute('search.results_count', fusionResults.length);
+    rootSpan.setAttribute('search.text_results', textResults.length);
+    rootSpan.setAttribute('search.vector_results', vectorResults.length);
+    rootSpan.setAttribute('http.status_code', 200);
+    rootSpan.setStatus({ code: SpanStatusCode.OK });
+
+    const traceId = rootSpan.spanContext().traceId;
+
     return NextResponse.json({
       success: true,
       results: fusionResults,
@@ -420,16 +509,27 @@ export async function POST(req: NextRequest) {
       latency: `${latency}ms`,
       timingBreakdown,
       esProfile: esProfileData, // Include raw ES profile for debugging
+      traceId, // Include trace ID for Kibana lookup
     });
   } catch (error: any) {
     console.error('Hybrid search error:', error);
+    rootSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: error.message || 'Hybrid search failed',
+    });
+    rootSpan.recordException(error instanceof Error ? error : new Error(String(error)));
+    rootSpan.setAttribute('http.status_code', 500);
 
     return NextResponse.json(
       {
         success: false,
         error: error.message || 'Hybrid search failed',
+        traceId: rootSpan.spanContext().traceId,
       },
       { status: 500 }
     );
+  } finally {
+    rootSpan.end();
   }
+  }); // End of context.with
 }

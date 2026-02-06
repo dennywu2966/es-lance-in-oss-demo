@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { Code2, Shield, Activity, Cloud, ChevronDown } from "lucide-react";
-import { validationPhases } from "@/lib/data";
-import { expandCollapse, slideUp } from "@/lib/animations";
+import { validationPhases } from "@/shared/lib/data";
+import { expandCollapse, slideUp } from "@/shared/lib/animations";
 import { useState } from "react";
 
 export function ValidationTimeline() {

@@ -1,12 +1,61 @@
-import { Hero } from "@/components/hero";
-import { Architecture } from "@/components/architecture";
-import { ValidationTimeline } from "@/components/validation-timeline";
+import { Hero, Architecture, CTA, ValidationTimeline, WaterfallTimeline } from "@/shared/ui";
 import { PerformanceDashboard } from "@/components/performance-dashboard";
-import { VectorManagement } from "@/components/vector-management";
-import { LiveDemo } from "@/components/live-demo";
-import { TechCards } from "@/components/tech-cards";
-import { CodePreview } from "@/components/code-preview";
-import { CTA } from "@/components/cta";
+import { VectorManagement } from "@/features/vector-mgmt";
+import { LiveDemo } from "@/features/live-demo";
+import dynamic from 'next/dynamic';
+import { Suspense } from 'react';
+
+// Lazy load heavy below-the-fold components
+const TechCards = dynamic(() => import('@/shared/ui').then(mod => ({ default: mod.TechCards })), {
+  loading: () => (
+    <section className="py-20 relative">
+      <div className="container mx-auto px-6">
+        <div className="animate-pulse bg-white/5 rounded-lg h-64" />
+      </div>
+    </section>
+  ),
+});
+
+const CodePreview = dynamic(() => import('@/shared/ui').then(mod => ({ default: mod.CodePreview })), {
+  loading: () => (
+    <section className="py-20 relative">
+      <div className="container mx-auto px-6">
+        <div className="animate-pulse bg-white/5 rounded-lg h-96" />
+      </div>
+    </section>
+  ),
+});
+
+// Lazy load feature components
+const LazyVectorManagement = dynamic(() => import('@/features/vector-mgmt').then(mod => ({ default: mod.VectorManagement })), {
+  loading: () => (
+    <section className="py-20 relative">
+      <div className="container mx-auto px-6 text-center">
+        <div className="animate-pulse bg-white/5 rounded-lg h-64" />
+      </div>
+    </section>
+  ),
+});
+
+const LazyLiveDemo = dynamic(() => import('@/features/live-demo').then(mod => ({ default: mod.LiveDemo })), {
+  loading: () => (
+    <section className="py-20 relative">
+      <div className="container mx-auto px-6 text-center">
+        <div className="animate-pulse bg-white/5 rounded-lg h-64" />
+      </div>
+    </section>
+  ),
+});
+
+const LazyPerformanceDashboard = dynamic(() => import('@/components/performance-dashboard').then(mod => ({ default: mod.PerformanceDashboard })), {
+  loading: () => (
+    <section className="py-20 relative">
+      <div className="container mx-auto px-6 text-center">
+        <div className="animate-pulse bg-white/5 rounded-lg h-64" />
+      </div>
+    </section>
+  ),
+});
 
 export default function Home() {
   return (
@@ -77,19 +126,29 @@ export default function Home() {
       <ValidationTimeline />
 
       {/* Performance Dashboard */}
-      <PerformanceDashboard />
+      <Suspense fallback={<div className="py-20"><div className="animate-pulse bg-white/5 rounded-lg h-64 mx-6" /></div>}>
+        <LazyPerformanceDashboard />
+      </Suspense>
 
       {/* Vector Management System */}
-      <VectorManagement />
+      <Suspense fallback={<div className="py-20"><div className="animate-pulse bg-white/5 rounded-lg h-64 mx-6" /></div>}>
+        <LazyVectorManagement />
+      </Suspense>
 
       {/* Live Demo */}
-      <LiveDemo />
+      <Suspense fallback={<div className="py-20"><div className="animate-pulse bg-white/5 rounded-lg h-64 mx-6" /></div>}>
+        <LazyLiveDemo />
+      </Suspense>
 
       {/* Technical Deep Dive */}
-      <TechCards />
+      <Suspense fallback={<div className="py-20"><div className="animate-pulse bg-white/5 rounded-lg h-64 mx-6" /></div>}>
+        <TechCards />
+      </Suspense>
 
       {/* Code Preview */}
-      <CodePreview />
+      <Suspense fallback={<div className="py-20"><div className="animate-pulse bg-white/5 rounded-lg h-64 mx-6" /></div>}>
+        <CodePreview />
+      </Suspense>
 
       {/* CTA Section */}
       <CTA />

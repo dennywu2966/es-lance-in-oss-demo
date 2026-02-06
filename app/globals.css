@@ -102,3 +102,62 @@ html {
   );
   background-size: 1000px 100%;
 }
+
+/* Markdown content styles */
+.markdown-content {
+  --color-prose-headings: #ffffff;
+  --color-prose-text: #d1d5db;
+  --color-prose-links: #fb923c;
+  --color-prose-bold: #ffffff;
+  --color-prose-code: #fb923c;
+  --color-prose-pre-code: #e5e7eb;
+  --color-prose-pre-bg: #1e293b;
+  --color-prose-hr: #374151;
+  --color-prose-quote-borders: #fb923c;
+  --color-prose-captions: #9ca3af;
+  --color-prose-kbd: #1f2937;
+  --color-prose-kbd-shadows: #374151;
+  --color-prose-th-borders: #374151;
+  --color-prose-td-borders: #374151;
+}
+
+.markdown-content :where(pre):not(:where([class~='not-prose'] *)) {
+  background-color: #1e293b;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.markdown-content :where(code):not(:where([class~='not-prose'] *)) {
+  font-weight: 400;
+  font-size: 0.875em;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #fb923c;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+}
+
+.markdown-content :where(pre code):not(:where([class~='not-prose'] *)) {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.markdown-content .anchor {
+  opacity: 0;
+  transition: opacity 0.2s;
+  margin-left: 0.5rem;
+  text-decoration: none;
+}
+
+.markdown-content h1:hover .anchor,
+.markdown-content h2:hover .anchor,
+.markdown-content h3:hover .anchor,
+.markdown-content h4:hover .anchor {
+  opacity: 1;
+}
+
+.markdown-content .anchor:before {
+  content: '#';
+  color: #fb923c;
+}

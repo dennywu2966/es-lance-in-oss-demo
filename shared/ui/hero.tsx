@@ -1,9 +1,9 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowDown, Clock, Cloud, MemoryStick } from "lucide-react";
-import { statsBadges } from "@/lib/data";
-import { fadeIn, slideUp } from "@/lib/animations";
+import { ArrowDown, BookOpen, Cloud, MemoryStick } from "lucide-react";
+import { statsBadges } from "@/shared/lib/data";
+import { fadeIn, slideUp } from "@/shared/lib/animations";
 
 export function Hero() {
   return (
@@ -75,7 +75,7 @@ export function Hero() {
           })}
         </motion.div>
 
-        {/* CTA Button */}
+        {/* CTA Buttons */}
         <motion.div
           initial="hidden"
           animate="visible"
@@ -92,6 +92,15 @@ export function Hero() {
               <ArrowDown className="w-4 h-4 group-hover:translate-y-1 transition-transform" />
             </span>
             <div className="absolute inset-0 bg-gradient-to-r from-primary-light to-accent-light opacity-0 group-hover:opacity-100 transition-opacity" />
+          </a>
+          <a
+            href="/docs"
+            className="group px-8 py-4 glass-card glass-card-hover text-white font-semibold rounded-lg transition-all duration-300"
+          >
+            <span className="flex items-center gap-2">
+              View Documentation
+              <BookOpen className="w-4 h-4" />
+            </span>
           </a>
         </motion.div>
 
