@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { TrendingUp, Cpu, Database, Zap } from "lucide-react";
-import { performanceMetrics } from "@/lib/data";
-import { slideUp, progressAnimation } from "@/lib/animations";
+import { performanceMetrics } from "@/shared/lib/data";
+import { slideUp, progressAnimation } from "@/shared/lib/animations";
 import { useEffect, useState } from "react";
 
 export function PerformanceDashboard() {

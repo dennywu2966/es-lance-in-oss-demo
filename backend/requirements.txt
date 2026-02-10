@@ -1,0 +1,18 @@
+# Python Backend Dependencies
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# OSS and Lance
+oss2==2.18.5
+lance>=0.1.0
+pyarrow>=14.0.0
+numpy>=1.26.0
+
+# Async and utilities
+aiohttp>=3.9.0
+aiofiles>=23.0.0
+
+# GLM and Jina APIs
+httpx>=0.26.0
+

@@ -1,8 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getOSSConfig } from "@/lib/oss-client";
 
 const execAsync = promisify(exec);
+
+// Cache for 30 seconds - sampling results are relatively stable
+export const revalidate = 30;
+
+// Helper with timeout and env support
+function execWithTimeout(command: string, timeout: number, env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Command timed out after ${timeout}ms`));
+    }, timeout);
+
+    const options = env ? { env: { ...process.env, ...env } } : undefined;
+    const proc = exec(command, options, (error, stdout, stderr) => {
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 interface VectorSampleRequest {
   dataset: string;
@@ -19,6 +43,9 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { dataset, count = 10 } = body as VectorSampleRequest;
+
+    // Get OSS config for Python script
+    const ossConfig = await getOSSConfig();
 
     if (!dataset) {
       return NextResponse.json(
@@ -42,12 +69,12 @@ for var in list(os.environ.keys()):
 
 # Import OSS after clearing proxy
 import oss2
-import lance
+import lancedb
 import random
 
 # OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
+auth = oss2.Auth(os.environ.get("OSS_ACCESS_KEY_ID", ""), os.environ.get("OSS_ACCESS_KEY_SECRET", ""))
+bucket = oss2.Bucket(auth, os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com"), os.environ.get("OSS_BUCKET", "denny-test-lance"))
 
 # Dataset path in OSS
 temp_dir = "${tempDir}"
@@ -75,35 +102,60 @@ for obj in result.object_list:
 
 print(f"Downloaded {downloaded} files", file=sys.stderr, flush=True)
 
-# Open Lance dataset
-dataset = lance.dataset(temp_dir)
+# Open Lance dataset using lancedb (new API)
+db = lancedb.connect(temp_dir)
+
+# Get table names - handle different LanceDB response formats
+tables_response = db.list_tables()
+if isinstance(tables_response, list):
+    table_names = tables_response
+elif hasattr(tables_response, 'tables'):
+    table_names = tables_response.tables
+else:
+    table_names = list(tables_response)
+
+if not table_names:
+    raise Exception("No tables found in LanceDB database")
+
+print(f"Found tables: {table_names}", file=sys.stderr, flush=True)
+
+# Open the first table (usually 'data')
+table = db.open_table(table_names[0])
 
 # Get total count
-total_count = dataset.count_rows()
+total_count = table.count_rows()
 print(f"Dataset has {total_count} vectors", file=sys.stderr, flush=True)
 
 # Sample random indices
 sample_indices = random.sample(range(min(total_count, sample_count * 10)), min(sample_count, total_count))
 
-# Fetch sampled vectors
-table = dataset.take(sample_indices)
-data = table.to_pydict()
+# Fetch sampled vectors using to_pandas with row filter
+df = table.to_pandas()
+sampled_df = df.iloc[sample_indices]
 
 # Prepare results
 samples = []
-for i in range(len(data['_id'])):
-    doc_id = data['_id'][i]
-    vector_data = data['vector'][i]
-    if hasattr(vector_data, 'as_py'):
+for idx, row in sampled_df.iterrows():
+    doc_id = row.get('_id', str(idx))
+    vector_data = row.get('vector', [])
+    category_data = row.get('category', 'unknown')
+
+    # Handle numpy arrays and pyarrow types
+    if hasattr(doc_id, 'item'):
+        doc_id = doc_id.item()
+    if hasattr(vector_data, 'tolist'):
+        vector_data = vector_data.tolist()
+    elif hasattr(vector_data, 'as_py'):
         vector_data = vector_data.as_py()
-    category_data = data['category'][i]
-    if hasattr(category_data, 'as_py'):
+    if hasattr(category_data, 'item'):
+        category_data = category_data.item()
+    elif hasattr(category_data, 'as_py'):
         category_data = category_data.as_py()
 
     samples.append({
-        'id': doc_id,
-        'vector': vector_data.tolist() if hasattr(vector_data, 'tolist') else list(vector_data),
-        'category': category_data
+        'id': str(doc_id),
+        'vector': list(vector_data) if vector_data is not None else [],
+        'category': str(category_data) if category_data is not None else 'unknown'
     })
 
 # Cleanup
@@ -113,7 +165,17 @@ shutil.rmtree(temp_dir, ignore_errors=True)
 print(json.dumps({'success': True, 'samples': samples, 'total': total_count}))
 `;
 
-    const { stdout } = await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
+    // Prepare environment with OSS credentials
+    // Note: ossConfig.endpoint already contains the full endpoint (e.g., "oss-ap-southeast-1-internal.aliyuncs.com")
+    const env = {
+      OSS_ACCESS_KEY_ID: ossConfig.accessKeyId,
+      OSS_ACCESS_KEY_SECRET: ossConfig.accessKeySecret,
+      OSS_ENDPOINT: (ossConfig as any).endpoint || `${ossConfig.region}.aliyuncs.com`,
+      OSS_REGION: ossConfig.region,
+      OSS_BUCKET: ossConfig.bucket,
+    };
+
+    const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000, env);
 
     const data = JSON.parse(stdout.trim());
 

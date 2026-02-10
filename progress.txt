@@ -1,0 +1,270 @@
+## Codebase Patterns
+
+- **Python script pattern in Node.js**: Use heredoc syntax (`python3 - <<'PYEOF'\\n${script}\\nPYEOF`) to execute Python code from TypeScript files. Remember to clear proxy environment variables before importing Python libraries.
+- **OSS credentials management**: OSS credentials are read from environment variables (OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_BUCKET, OSS_REGION). Never hardcode credentials in frontend code.
+- **API route structure**: All API routes use `app/api/[resource]/[action]/route.ts` pattern with POST handlers that return JSON responses with `{ success: boolean, ... }` structure.
+- **Error handling**: Always wrap Python execution in try-catch blocks with cleanup of temp directories using `fs.rm(tempDir, { recursive: true, force: true })`.
+- **Elasticsearch integration**: ES uses Basic auth (base64-encoded credentials), bulk API expects NDJSON format (newline-delimited JSON), dense_vector field requires exact dimensions, cosine similarity is default metric.
+- **Lance dataset operations**: Extract vectors with `.as_py().tolist()` pattern, use `dataset.to_table(columns=[...])` for selective loading, always cleanup temp directories after operations.
+- **Performance tracking**: Use `Date.now()` before and after each phase to build timing breakdowns. Store timing as `{ phase: string, duration: number, startOffset: number }` array for waterfall visualization.
+- **Component composition**: Create reusable visualization components (like WaterfallTimeline) that accept data props and handle their own animations and styling with Framer Motion.
+- **Glass-morphism UI pattern**: Always use `glass-card` class for consistent glass-morphism styling instead of inline `bg-white/5 backdrop-blur-sm border border-white/10`. Use semantic variants (`glass-card-error`, `glass-card-success`, `glass-card-warning`, `glass-card-info`) for colored states, and `glass-card-hover` for interactive elements.
+
+## 2025-01-27 12:40 - US-001
+- Implemented document generation with Jina embeddings (jina-embeddings-v2-base-en model, 768 dimensions)
+- Created 20 hardcoded fake documents covering tech topics: AI, databases, search engines, cloud computing, ML, distributed systems, DevOps, data engineering, software architecture, software development
+- Added `generateDocumentsWithEmbeddings()` function in `lib/oss-client.ts` that:
+  - Calls Jina API for each document text sequentially
+  - Generates Lance dataset with schema: id, title, text, topic, created_at, vector
+  - Creates IVF_PQ vector index with num_partitions = max(2, len // 5) and num_sub_vectors = min(dims // 8, 64)
+  - Uploads to OSS at `lance-documents/dataset.lance`
+  - Returns success status, document count, and OSS path
+- Created API route `app/api/vectors/documents/generate/route.ts` (POST endpoint)
+- Updated `.env.example` to include JINA_API_KEY
+
+**Files changed:**
+- `lib/oss-client.ts`: Added FakeDocument interface, FAKE_DOCUMENTS constant (20 docs), generateDocumentsWithEmbeddings() function
+- `app/api/vectors/documents/generate/route.ts`: New API route
+- `.env.example`: Added JINA_API_KEY configuration
+
+**Learnings for future iterations:**
+- The Jina API is called sequentially (20 requests). For production, consider batching or parallel requests with rate limiting.
+- Lance dataset schema uses `pa.string()` for Java compatibility (avoid `pa.utf8()`).
+- Python script must clear proxy environment variables (`http_proxy`, `https_proxy`, etc.) before importing libraries to avoid import errors.
+- IVF_PQ index parameters are calculated based on dataset size: num_partitions = max(2, min(n // 5, 8)) for small datasets (20 docs = 4 partitions).
+- Error handling tracks failed documents but continues processing others.
+- Temp directories use `/tmp/lance-docs-${Date.now()}` pattern to avoid conflicts.
+---
+
+## 2025-01-27 - US-002
+- Implemented document viewing functionality from Lance dataset stored in OSS
+- Created API route `app/api/vectors/documents/route.ts` that:
+  - Downloads Lance dataset from OSS (`lance-documents/dataset.lance`)
+  - Uses Python to read documents with columns: id, title, text, topic, created_at
+  - Returns documents as JSON with total count
+  - Cleans up temp directories after processing
+- Updated `components/vector-management.tsx` with:
+  - New "DOCUMENTS" button (emerald color) in dataset actions
+  - Document display panel showing all document fields
+  - Loading state with spinning refresh icon during fetch
+  - Documents displayed in scrollable container with max-height: 800px
+  - Each document shows: index badge, title, topic tag, created date, id, and full text
+  - Consistent glass-morphism styling matching existing UI
+
+**Files changed:**
+- `app/api/vectors/documents/route.ts`: New API route (POST endpoint)
+- `components/vector-management.tsx`: Added Document interface, documents state, loadDocuments function, DOCUMENTS button, and documents display section
+
+**Learnings for future iterations:**
+- Lance dataset reading pattern: download from OSS to /tmp, use Python to read with `lance.dataset()`, use `to_table()` with column filters to load specific fields, then cleanup
+- Documents are read with `limit` parameter (default 20) to avoid loading massive datasets
+- Python script must clear proxy environment variables before importing lance library
+- Document display uses similar UI pattern to sampled vectors but with different layout (header with metadata, body with text content)
+- Text content is displayed in a smaller font (text-sm) with leading-relaxed for better readability
+- Document cards have hover effect: hover:border-emerald-500/30 transition-colors
+---
+
+## 2025-01-27 - US-003
+- Implemented Elasticsearch backfill functionality for Lance documents
+- Updated `app/api/vectors/backfill/route.ts` to:
+  - Read documents with embeddings from Lance dataset in OSS (lance-documents/dataset.lance)
+  - Create Elasticsearch index with proper mapping for dense_vector field (768 dims, cosine similarity)
+  - Index documents in batches (20 docs per batch) using ES bulk API
+  - Return detailed response: indexed count, total count, vector dimensions, duration
+  - Support optional index creation (default: true)
+- Updated `components/vector-management.tsx` to:
+  - Add `isBackfilling` state variable
+  - Add `backfillToElasticsearch()` function to call the backfill API
+  - Add Upload icon import from lucide-react
+  - Add "BACKFILL ES" button (blue color) between DOCUMENTS and DELETE buttons
+  - Button shows loading spinner during backfill operation
+  - Button disabled during other operations (generating, sampling, loading documents)
+
+**Files changed:**
+- `app/api/vectors/backfill/route.ts`: Complete rewrite for document backfill (was for old vector datasets)
+- `components/vector-management.tsx`: Added backfill state, function, and button
+
+**Learnings for future iterations:**
+- Elasticsearch dense_vector field requires exact dimensions specification (768 for Jina embeddings)
+- ES bulk API expects newline-delimited JSON (NDJSON) format, not regular JSON array
+- ES index creation uses 400 response when index already exists - this is expected behavior
+- Lance dataset vector extraction: use `.as_py()` method then `.tolist()` to convert PyArrow data to Python list
+- Backfill pattern: download from OSS → read with Python → index to ES → cleanup temp directory
+- Batch size of 20 documents keeps bulk requests under ES recommended 10MB limit
+- ES authentication uses Basic auth with base64-encoded credentials
+- Document mapping includes keyword subfields for exact matching (id, title.keyword)
+- Cosine similarity is the default for dense_vector - matches Lance embedding similarity metric
+---
+
+## 2025-01-27 - US-004
+- Implemented automatic embedding generation for hybrid search fusion
+- Added `generateQueryEmbedding()` function in `app/api/search/hybrid/route.ts` that:
+  - Calls Jina API (jina-embeddings-v2-base-en model) to generate 768-dimension embeddings from query text
+  - Validates JINA_API_KEY environment variable before making requests
+  - Returns embedding as number[] for vector search
+- Updated hybrid search POST handler to:
+  - Automatically generate embeddings from query text when no query vector is provided
+  - Use generated embedding for vector kNN search while also performing BM25 text search
+  - Fuse results from both searches using RRF (Reciprocal Rank Fusion)
+  - Return generated query vector in response for transparency
+- Error handling for Jina API failures with descriptive error messages
+- Build succeeds with no TypeScript errors
+
+**Files changed:**
+- `app/api/search/hybrid/route.ts`: Added generateQueryEmbedding() function, updated POST handler to auto-generate embeddings
+
+**Learnings for future iterations:**
+- Hybrid search now works end-to-end with just query text input - no need to pre-generate embeddings
+- Jina API calls are synchronous and can add 200-500ms latency to hybrid search
+- The fusion approach combines BM25 (keyword matching) with semantic search (vector similarity) for better relevance
+- RRF scoring uses k=60 constant for both text and vector rankings: score = weight / (60 + rank)
+- When only query text is provided, both text and vector search are performed, then fused
+- When only query vector is provided, only vector search is performed (no text search possible)
+- Match type in results indicates whether document came from text search, vector search, or appeared in both (hybrid)
+---
+
+## 2025-01-27 - US-005
+- Verified existing view/hide document details functionality in search results
+- Feature was already implemented in the initial commit (b359703)
+- The `components/live-demo.tsx` component includes:
+  - `showOriginalDoc` state to track expanded documents (line 61)
+  - `toggleOriginalDoc()` function to handle expand/collapse (lines 162-172)
+  - "SHOW DOC" / "HIDE DOC" button in each search result (lines 641-656)
+  - Original Document Display section showing full details when expanded (lines 692-732)
+- Document details displayed include:
+  - Primary Key (_id)
+  - Category
+  - Full text content
+  - First 10 dimensions of the vector (if available)
+- UI uses Framer Motion for smooth expand/collapse animations
+- Build succeeds with no TypeScript errors
+- No code changes required - feature verification complete
+
+**Files changed:**
+- `prd.json`: Marked US-005 `passes: true`
+
+**Learnings for future iterations:**
+- Some features may be already implemented in the initial codebase - always verify existing functionality before starting implementation
+- The live-demo component uses two separate expansion states: `expandedResults` for vector data and `showOriginalDoc` for document text
+- Document expansion shows different content than vector expansion - documents show structured metadata while vectors show numerical data
+- The button toggles between two icons: Database (SHOW DOC) and FileText (HIDE DOC) to provide visual feedback
+- Expansion uses Framer Motion with `height: "auto"` and `opacity: 1` for smooth animations
+- Always verify the PRD requirements match what's actually in the code before assuming work needs to be done
+---
+
+## 2025-01-27 - US-006
+- Implemented interactive Elasticsearch query editor with live execution
+- Created new API route `app/api/search/custom/route.ts` that:
+  - Accepts custom Elasticsearch query JSON
+  - Executes query against the configured ES index
+  - Returns full ES response with total hits and latency
+  - Validates JSON and provides clear error messages
+- Updated `components/live-demo.tsx` to include:
+  - Third search mode: "Custom Query" alongside kNN and Hybrid search
+  - Custom query editor with textarea for JSON input (resizable, 64 lines height)
+  - Three example query loaders: Match, kNN, and Bool queries
+  - JSON validation with client-side error checking before API call
+  - Custom query execution with dedicated purple/pink gradient button
+  - Results display showing full ES response JSON with copy button
+  - Formatted results list displaying hits with score, document ID, category, and text
+  - "Execute Another Query" button to reset and run new queries
+  - Error state display for invalid JSON or ES execution failures
+- UI features:
+  - Glass-morphism styling consistent with existing components
+  - Purple/pink gradient theme to distinguish from other search modes
+  - Responsive textarea with monospace font for JSON editing
+  - Example query buttons for quick starts (Match, kNN, Bool)
+  - Smooth animations using Framer Motion
+  - Loading state with spinner during query execution
+- Build succeeds with no TypeScript errors related to new code
+
+**Files changed:**
+- `app/api/search/custom/route.ts`: New API route for custom ES query execution
+- `components/live-demo.tsx`: Added custom query mode, editor UI, results display, and state management
+
+**Learnings for future iterations:**
+- Custom query editor provides flexibility for users to test advanced ES features not exposed in the UI
+- JSON validation on both client and server provides better UX with immediate feedback
+- Example queries help users understand the expected format and capabilities
+- Displaying full ES response JSON allows power users to debug and explore
+- The custom query mode uses `isCustomMode` state alongside `isHybridMode` to manage three different search interfaces
+- Custom queries bypass the profiling toggle and vector selection controls since users can add those directly in JSON
+- Results display handles both structured hits (with _source) and raw JSON response for flexibility
+- Purple/pink gradient theme (`from-purple-500 to-pink-500`) visually distinguishes custom query mode from kNN (primary blue) and hybrid (accent/primary gradient)
+- The textarea uses `resize-y` class to allow vertical resizing while preventing horizontal overflow
+- Example buttons use `Math.random()` to generate sample vectors for kNN queries
+- Error handling includes both JSON parse errors and ES execution errors with clear messages
+---
+
+## 2025-01-27 - US-007
+- Implemented waterfall timeline visualization for hybrid search performance
+- Updated hybrid search API (`app/api/search/hybrid/route.ts`) to track and return detailed timing breakdowns for each search phase
+- Created new `components/waterfall-timeline.tsx` component with:
+  - Visual waterfall chart showing phase execution timeline with start offsets and durations
+  - Color-coded gradient bars for each phase (Embedding, Text Search, Vector Search, Fusion)
+  - Time axis with 5 reference points (0ms, 25%, 50%, 75%, 100% of total duration)
+  - Phase icons and labels with duration display
+  - Legend explaining color coding
+  - Performance insights section with optimization recommendations
+  - Smooth Framer Motion animations on load
+- Updated `components/live-demo.tsx` to:
+  - Import and integrate WaterfallTimeline component
+  - Display waterfall visualization for hybrid search results only
+  - Show timing breakdown below existing profiling section
+- Timing breakdown tracks:
+  - Embedding Generation: Jina API call duration
+  - Text Search (BM25): Elasticsearch text query duration
+  - Vector Search (kNN): Elasticsearch kNN query duration
+  - RRF Fusion: Result fusion and ranking duration
+- Build succeeds with no TypeScript errors
+
+**Files changed:**
+- `app/api/search/hybrid/route.ts`: Added TimingBreakdown interface, phase tracking in POST handler
+- `components/waterfall-timeline.tsx`: New component with waterfall timeline visualization
+- `components/live-demo.tsx`: Added WaterfallTimeline import and integration
+
+**Learnings for future iterations:**
+- Waterfall visualization helps identify parallel execution opportunities (text and vector searches could run concurrently)
+- The timing breakdown shows that embedding generation is often the bottleneck (~200-500ms for Jina API)
+- Total latency includes all phases sequentially - parallelizing text/vector search would reduce total time
+- The waterfall chart uses percentage-based positioning to handle varying total durations gracefully
+- Phase colors match the search type (purple for embedding, blue for text, emerald for vector, pink for fusion)
+- Performance insights are dynamically generated based on timing thresholds (e.g., embedding > 200ms triggers caching recommendation)
+- The visualization only appears for hybrid searches where all timing data is available
+- Start offset tracking reveals the sequential nature of the current implementation
+- Glass-morphism styling maintains consistency with other UI components
+---
+
+## 2025-01-27 - US-008
+- Implemented consistent glass-morphism UI styling across the entire application
+- Added semantic glass-morphism CSS variants in `app/globals.css`:
+  - `glass-card-error`: Red-tinted glass card for error states
+  - `glass-card-success`: Green-tinted glass card for success states
+  - `glass-card-warning`: Amber-tinted glass card for warning states
+  - `glass-card-info`: Blue-tinted glass card for info states
+- Updated `components/vector-management.tsx` to use standardized glass-card classes:
+  - Generator panel: Changed from custom `bg-gray-900/80 backdrop-blur-sm` to `glass-card`
+  - Error alerts: Changed from `bg-red-500/10 border border-red-500/30` to `glass-card-error`
+  - Success alerts: Changed from `bg-emerald-500/10 border border-emerald-500/30` to `glass-card-success`
+  - Table container: Changed from custom backdrop-blur to `glass-card`
+  - Action buttons: Updated to use semantic glass classes with hover effects
+  - Sampled vectors panel: Changed from custom backdrop-blur to `glass-card`
+  - Documents panel: Changed from custom backdrop-blur to `glass-card`
+- Updated `components/validation-timeline.tsx`:
+  - Expandable details section: Changed from `bg-white/5 border-l-2` to `glass-card glass-card-hover`
+- Build succeeded with no TypeScript errors
+
+**Files changed:**
+- `app/globals.css`: Added 4 semantic glass-morphism CSS classes
+- `components/vector-management.tsx`: Updated 7 sections to use glass-card classes
+- `components/validation-timeline.tsx`: Updated expandable details to use glass-card classes
+
+**Learnings for future iterations:**
+- Using reusable CSS classes instead of inline styling provides better maintainability and consistency
+- Semantic class names (error, success, warning, info) make the code more readable and self-documenting
+- The glass-morphism pattern (`bg-white/5 backdrop-blur-sm border border-white/10`) is now centralized in one place
+- When updating UI components, always check if there's an existing glass-card class before using inline backdrop-blur
+- The `glass-card-hover` class should be added to interactive elements that need hover feedback
+- Color-tinted glass variants maintain the same backdrop-blur and border structure while adding semantic meaning
+- This styling pattern is now consistent across: Hero, Architecture, Validation Timeline, Performance Dashboard, Vector Management, Live Demo, Tech Cards, Code Preview, CTA, and Waterfall Timeline sections
+---

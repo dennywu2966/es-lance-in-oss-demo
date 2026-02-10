@@ -6,7 +6,17 @@
       "Bash(lsof:*)",
       "Bash(python3:*)",
       "Bash(sudo iptables:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(./start_es_with_plugins.sh:*)",
+      "Bash(for:*)",
+      "Bash(do:*)",
+      "Bash(if curl -s http://localhost:920)",
+      "Bash(then)",
+      "Bash(break:*)",
+      "Bash(fi)",
+      "Bash(done:*)",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_install"
     ]
   }
 }

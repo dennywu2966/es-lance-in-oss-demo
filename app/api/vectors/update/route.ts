@@ -59,7 +59,7 @@ for var in list(os.environ.keys()):
         del os.environ[var]
 
 import oss2
-import lance
+import lancedb
 import numpy as np
 import pyarrow as pa
 
@@ -136,11 +136,15 @@ for root, dirs, files in os.walk(temp_dir):
         rel_path = os.path.relpath(full_path, temp_dir)
         print(f"  {rel_path}: {file_size} bytes", file=sys.stderr, flush=True)
 
-# Verify the dataset is valid
+# Verify the dataset is valid using LanceDB (new API)
 try:
     print(f"Opening dataset: {temp_dir}", file=sys.stderr, flush=True)
-    dataset = lance.dataset(temp_dir)
-    existing_count = dataset.count_rows()
+    db = lancedb.connect(temp_dir)
+    tables = db.list_tables()
+    if not tables:
+        raise Exception("No tables found in LanceDB database")
+    table = db.open_table(tables[0])
+    existing_count = table.count_rows()
     print(f"Dataset opened successfully: {existing_count} vectors", file=sys.stderr, flush=True)
 except Exception as e:
     print(f"ERROR opening dataset: {e}", file=sys.stderr, flush=True)
@@ -152,67 +156,44 @@ print(f"Generating {additional_vectors} new vectors...", file=sys.stderr, flush=
 new_vectors_array = np.random.randn(additional_vectors, dims).astype(np.float32)
 new_vectors_array = new_vectors_array / np.linalg.norm(new_vectors_array, axis=1, keepdims=True)
 
-# Create schema matching existing dataset
-vector_type = pa.list_(pa.float32(), list_size=dims)
-schema = pa.schema([
-    pa.field('_id', pa.string()),
-    pa.field('vector', vector_type),
-    pa.field('category', pa.string())
-])
-
-# Create FixedSizeListArray for new vectors
-flat_vectors = new_vectors_array.flatten()
-vector_array = pa.FixedSizeListArray.from_arrays(
-    pa.array(flat_vectors, type=pa.float32()),
-    dims
-)
-
-# Create table for new data
+# Create new data as list of dicts for LanceDB
 categories = np.random.choice(['tech', 'science', 'business', 'finance', 'health'], additional_vectors)
 new_start_id = existing_count
-new_table = pa.table({
-    '_id': [f"doc_{new_start_id + i}" for i in range(additional_vectors)],
-    'vector': vector_array,
-    'category': pa.array(categories.tolist())
-}, schema=schema)
+new_data = []
+for i in range(additional_vectors):
+    new_data.append({
+        '_id': f"doc_{new_start_id + i}",
+        'vector': new_vectors_array[i].tolist(),
+        'category': str(categories[i])
+    })
 
 print(f"Appending {additional_vectors} vectors to existing {existing_count}...", file=sys.stderr, flush=True)
 
-# Read existing table and combine
+# Add new data to table using LanceDB API
 try:
-    existing_table = dataset.to_table()
-    print(f"Existing table loaded: {existing_table.num_rows} rows", file=sys.stderr, flush=True)
-    combined_table = pa.concat_tables([existing_table, new_table])
-    print(f"Combined table: {combined_table.num_rows} total rows", file=sys.stderr, flush=True)
+    table.add(new_data)
+    total_vectors = table.count_rows()
+    print(f"Combined table: {total_vectors} total rows", file=sys.stderr, flush=True)
 except Exception as e:
-    print(f"ERROR combining tables: {e}", file=sys.stderr, flush=True)
-    print(json.dumps({'success': False, 'error': f'Failed to combine tables: {str(e)}'}))
+    print(f"ERROR adding data: {e}", file=sys.stderr, flush=True)
+    print(json.dumps({'success': False, 'error': f'Failed to add data: {str(e)}'}))
     sys.exit(1)
 
-# Write to a new location
-output_path = temp_dir + "_new"
-print(f"Writing to: {output_path}", file=sys.stderr, flush=True)
-try:
-    lance.write_dataset(combined_table, output_path)
-    print(f"Dataset written successfully", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"ERROR writing dataset: {e}", file=sys.stderr, flush=True)
-    print(json.dumps({'success': False, 'error': f'Failed to write dataset: {str(e)}'}))
-    sys.exit(1)
+# Output path is the same as temp_dir since LanceDB updates in place
+output_path = temp_dir
 
 # Rebuild IVF-PQ index if dataset is large enough
-total_vectors = combined_table.num_rows
 if total_vectors >= 256:
     print(f"Rebuilding IVF-PQ index for {total_vectors} vectors...", file=sys.stderr, flush=True)
     try:
-        new_dataset = lance.dataset(output_path)
         num_partitions = max(2, min(total_vectors // 100, 256))
-        new_dataset.create_index(
-            column='vector',
-            index_type='IVF_PQ',
+        table.create_index(
+            vector_column_name='vector',
             metric='cosine',
             num_partitions=num_partitions,
-            num_sub_vectors=min(dims // 8, 64)
+            num_sub_vectors=min(dims // 8, 64),
+            replace=True,
+            index_type='IVF_PQ'
         )
         print("Index created successfully", file=sys.stderr, flush=True)
     except Exception as e:

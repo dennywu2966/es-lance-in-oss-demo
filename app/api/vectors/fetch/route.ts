@@ -10,9 +10,13 @@ interface VectorFetchRequest {
 }
 
 interface VectorData {
+  _id: string;
   id: string;
-  vector: number[];
+  title: string;
+  text: string;
+  topic: string;
   category: string;
+  vector: number[];
 }
 
 export async function POST(req: NextRequest) {
@@ -47,7 +51,7 @@ for var in list(os.environ.keys()):
         del os.environ[var]
 
 import oss2
-import lance
+import lancedb
 
 # OSS credentials (from environment)
 auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
@@ -81,30 +85,45 @@ for obj in result.object_list:
 
 print(f"Downloaded {downloaded} files", file=sys.stderr, flush=True)
 
-# Open Lance dataset - use temp_dir directly since files are already there
-dataset = lance.dataset(temp_dir)
+# Open Lance dataset using LanceDB (new API)
+db = lancedb.connect(temp_dir)
 
-# Query for the specific document by _id
-query_table = dataset.to_table(columns=["_id", "vector", "category"])
-query_vector = query_table.to_pydict()
+# Get table names and open the first one
+tables = db.list_tables()
+if not tables:
+    raise Exception("No tables found in LanceDB database")
+table = db.open_table(tables[0])
+
+# Load all data to pandas dataframe
+df = table.to_pandas()
+query_data = df.to_dict('list')
 
 # Find the document
 result = None
-for i in range(len(query_vector['_id'])):
-    doc_id = query_vector['_id'][i]
+for i in range(len(query_data['_id'])):
+    doc_id = query_data['_id'][i]
     if doc_id == "${docId}":
-        # Convert PyArrow scalar to Python if needed
-        vector_data = query_vector['vector'][i]
-        if hasattr(vector_data, 'as_py'):
-            vector_data = vector_data.as_py()
-        category_data = query_vector['category'][i]
-        if hasattr(category_data, 'as_py'):
-            category_data = category_data.as_py()
+        # Helper function to convert PyArrow scalars
+        def to_string(val):
+            if hasattr(val, 'as_py'):
+                return val.as_py()
+            return str(val)
+
+        def to_list(val):
+            if hasattr(val, 'as_py'):
+                val = val.as_py()
+            if hasattr(val, 'tolist'):
+                return val.tolist()
+            return list(val)
 
         result = {
-            'id': doc_id,
-            'vector': vector_data.tolist() if hasattr(vector_data, 'tolist') else list(vector_data),
-            'category': category_data
+            '_id': to_string(doc_id),
+            'id': to_string(query_data['id'][i]),
+            'title': to_string(query_data['title'][i]),
+            'text': to_string(query_data['text'][i]),
+            'topic': to_string(query_data['topic'][i]),
+            'category': to_string(query_data['category'][i]),
+            'vector': to_list(query_data['vector'][i])
         }
         break
 

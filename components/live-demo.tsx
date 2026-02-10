@@ -3,7 +3,14 @@
 import { motion } from "framer-motion";
 import { Search, Zap, AlertCircle, RotateCw, CheckCircle2, ChevronDown, Activity, Eye, Database, Code, FileText, Sparkles } from "lucide-react";
 import { useState } from "react";
-import { slideUp } from "@/lib/animations";
+import { slideUp } from "@/shared/lib/animations";
+import { WaterfallTimeline } from "./waterfall-timeline";
+
+interface TimingBreakdown {
+  phase: string;
+  duration: number;
+  startOffset: number;
+}
 
 interface SearchResult {
   id: string;
@@ -30,6 +37,7 @@ interface SearchResponse {
   vectorResults?: number;
   fusionResults?: number;
   queryText?: string;
+  timingBreakdown?: TimingBreakdown[];
 }
 
 interface BackfillResponse {
@@ -61,6 +69,12 @@ export function LiveDemo() {
   const [showOriginalDoc, setShowOriginalDoc] = useState<Set<number>>(new Set());
   const [showEsRequest, setShowEsRequest] = useState(false);
   const [esRequestJson, setEsRequestJson] = useState<string>('');
+
+  // Custom query editor states
+  const [isCustomMode, setIsCustomMode] = useState(false);
+  const [customQuery, setCustomQuery] = useState('');
+  const [customQueryError, setCustomQueryError] = useState<string | null>(null);
+  const [customResponse, setCustomResponse] = useState<any>(null);
 
   const performSearch = async (isHybrid: boolean = false) => {
     setShowConfirm(false);
@@ -171,6 +185,42 @@ export function LiveDemo() {
     });
   };
 
+  const performCustomQuery = async () => {
+    setIsLoading(true);
+    setCustomQueryError(null);
+    setCustomResponse(null);
+
+    try {
+      // Validate JSON
+      let parsedQuery;
+      try {
+        parsedQuery = JSON.parse(customQuery);
+      } catch (err) {
+        setCustomQueryError('Invalid JSON format');
+        setIsLoading(false);
+        return;
+      }
+
+      const res = await fetch('/api/search/custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: parsedQuery }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setCustomResponse(data);
+      } else {
+        setCustomQueryError(data.error || 'Custom query failed');
+      }
+    } catch (err: any) {
+      setCustomQueryError(err.message || 'Failed to execute custom query');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const getEsRequestJson = () => {
     if (!response) return '';
 
@@ -187,17 +237,20 @@ export function LiveDemo() {
       };
 
       const vectorBody = {
-        knn: {
-          field: "embedding",
-          query_vector: response.queryVector,
-          k: topK,
-          num_candidates: topK * 2,
+        profile: enableProfiling,
+        query: {
+          lance_knn: {
+            field: "embedding",
+            query_vector: response.queryVector,
+            k: topK,
+            num_candidates: topK * 2,
+          }
         },
         size: topK,
         _source: ["id", "category", "text"],
       };
 
-      return `// Hybrid Search - Text Query (BM25):\n${JSON.stringify(hybridBody, null, 2)}\n\n// Hybrid Search - Vector Query (kNN):\n${JSON.stringify(vectorBody, null, 2)}`;
+      return `// Hybrid Search - Text Query (BM25):\n${JSON.stringify(hybridBody, null, 2)}\n\n// Hybrid Search - Vector Query (Lance kNN):\n${JSON.stringify(vectorBody, null, 2)}`;
     }
 
     // For kNN search, generate vector query
@@ -205,11 +258,13 @@ export function LiveDemo() {
 
     const queryBody = {
       profile: enableProfiling,
-      knn: {
-        field: "embedding",
-        query_vector: response.queryVector,
-        k: topK,
-        num_candidates: topK * 2,
+      query: {
+        lance_knn: {
+          field: "embedding",
+          query_vector: response.queryVector,
+          k: topK,
+          num_candidates: topK * 2,
+        }
       },
       size: topK,
       _source: ["category", "text"],
@@ -256,11 +311,11 @@ export function LiveDemo() {
         >
           <div className="glass-card p-8">
             {/* Search Mode Toggle */}
-            <div className="mb-6 flex items-center justify-center gap-4">
+            <div className="mb-6 flex items-center justify-center gap-4 flex-wrap">
               <button
-                onClick={() => { setIsHybridMode(false); setError(null); }}
+                onClick={() => { setIsHybridMode(false); setIsCustomMode(false); setError(null); }}
                 className={`px-6 py-3 rounded-lg font-mono text-sm transition-all ${
-                  !isHybridMode
+                  !isHybridMode && !isCustomMode
                     ? 'bg-primary text-white shadow-lg shadow-primary/30'
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                 }`}
@@ -270,7 +325,7 @@ export function LiveDemo() {
                 kNN Search
               </button>
               <button
-                onClick={() => { setIsHybridMode(true); setError(null); }}
+                onClick={() => { setIsHybridMode(true); setIsCustomMode(false); setError(null); }}
                 className={`px-6 py-3 rounded-lg font-mono text-sm transition-all ${
                   isHybridMode
                     ? 'bg-gradient-to-r from-accent to-primary text-white shadow-lg'
@@ -280,6 +335,18 @@ export function LiveDemo() {
               >
                 <Sparkles className="w-4 h-4 inline mr-2" />
                 Hybrid Search
+              </button>
+              <button
+                onClick={() => { setIsCustomMode(true); setIsHybridMode(false); setError(null); }}
+                className={`px-6 py-3 rounded-lg font-mono text-sm transition-all ${
+                  isCustomMode
+                    ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                }`}
+                disabled={isLoading}
+              >
+                <Code className="w-4 h-4 inline mr-2" />
+                Custom Query
               </button>
             </div>
 
@@ -348,55 +415,149 @@ export function LiveDemo() {
                 </div>
               )}
 
-              {/* Profiling Toggle */}
-              <div className="flex items-center justify-center gap-3">
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={enableProfiling}
-                    onChange={(e) => setEnableProfiling(e.target.checked)}
+              {/* Custom Query Editor */}
+              {isCustomMode && (
+                <div className="space-y-3">
+                  <div className="text-center">
+                    <label className="text-sm font-mono text-gray-300">Elasticsearch Query JSON:</label>
+                    <p className="text-xs text-gray-500 mt-1">Write and execute custom Elasticsearch queries</p>
+                  </div>
+                  <textarea
+                    value={customQuery}
+                    onChange={(e) => setCustomQuery(e.target.value)}
                     disabled={isLoading}
-                    className="sr-only peer"
+                    placeholder='{\n  "query": {\n    "match": {\n      "text": "search query"\n    }\n  },\n  "size": 10\n}'
+                    className="w-full h-64 bg-black/50 border border-gray-600 rounded px-4 py-3 text-white font-mono text-sm focus:outline-none focus:border-purple-500 disabled:opacity-50 resize-y"
                   />
-                  <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-                  <span className="ml-3 text-sm font-mono text-gray-300">Enable Profiling</span>
-                </label>
-                <span className="text-xs text-gray-500">(Shows timing breakdown)</span>
-              </div>
+                  <div className="flex items-center justify-center gap-4">
+                    <button
+                      onClick={() => setCustomQuery(JSON.stringify({
+                        query: {
+                          match: {
+                            text: "machine learning"
+                          }
+                        },
+                        size: 10
+                      }, null, 2))}
+                      disabled={isLoading}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-xs font-mono transition-colors disabled:opacity-50"
+                    >
+                      Load Example: Match
+                    </button>
+                    <button
+                      onClick={() => setCustomQuery(JSON.stringify({
+                        knn: {
+                          field: "embedding",
+                          query_vector: new Array(768).fill(0).map(() => Math.random()),
+                          k: 5,
+                          num_candidates: 10
+                        },
+                        size: 5
+                      }, null, 2))}
+                      disabled={isLoading}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-xs font-mono transition-colors disabled:opacity-50"
+                    >
+                      Load Example: kNN
+                    </button>
+                    <button
+                      onClick={() => setCustomQuery(JSON.stringify({
+                        query: {
+                          bool: {
+                            must: [
+                              { match: { text: "search" } }
+                            ],
+                            filter: [
+                              { term: { category: "databases" } }
+                            ]
+                          }
+                        },
+                        size: 10
+                      }, null, 2))}
+                      disabled={isLoading}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-xs font-mono transition-colors disabled:opacity-50"
+                    >
+                      Load Example: Bool
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Profiling Toggle (hide in custom mode) */}
+              {!isCustomMode && (
+                <div className="flex items-center justify-center gap-3">
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableProfiling}
+                      onChange={(e) => setEnableProfiling(e.target.checked)}
+                      disabled={isLoading}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                    <span className="ml-3 text-sm font-mono text-gray-300">Enable Profiling</span>
+                  </label>
+                  <span className="text-xs text-gray-500">(Shows timing breakdown)</span>
+                </div>
+              )}
             </div>
 
             {/* Search Button */}
-            <div className="flex justify-center mb-8">
-              <button
-                onClick={() => setShowConfirm(true)}
-                disabled={isLoading}
-                className="group relative px-8 py-4 bg-primary hover:bg-primary-dark disabled:bg-gray-700 text-white font-semibold rounded-lg overflow-hidden transition-all duration-300 disabled:cursor-not-allowed"
-              >
-                <span className="relative z-10 flex items-center gap-2">
-                  {isLoading ? (
-                    <>
-                      <RotateCw className="w-5 h-5 animate-spin" />
-                      Searching...
-                    </>
-                  ) : (
-                    <>
-                      {isHybridMode ? (
-                        <>
-                          <Sparkles className="w-5 h-5" />
-                          Execute Hybrid Search
-                        </>
-                      ) : (
-                        <>
-                          <Search className="w-5 h-5" />
-                          Execute kNN Search
-                        </>
-                      )}
-                    </>
-                  )}
-                </span>
-                <div className="absolute inset-0 bg-gradient-to-r from-primary-light to-accent-light opacity-0 group-hover:opacity-100 transition-opacity" />
-              </button>
-            </div>
+            {!isCustomMode ? (
+              <div className="flex justify-center mb-8">
+                <button
+                  onClick={() => setShowConfirm(true)}
+                  disabled={isLoading}
+                  className="group relative px-8 py-4 bg-primary hover:bg-primary-dark disabled:bg-gray-700 text-white font-semibold rounded-lg overflow-hidden transition-all duration-300 disabled:cursor-not-allowed"
+                >
+                  <span className="relative z-10 flex items-center gap-2">
+                    {isLoading ? (
+                      <>
+                        <RotateCw className="w-5 h-5 animate-spin" />
+                        Searching...
+                      </>
+                    ) : (
+                      <>
+                        {isHybridMode ? (
+                          <>
+                            <Sparkles className="w-5 h-5" />
+                            Execute Hybrid Search
+                          </>
+                        ) : (
+                          <>
+                            <Search className="w-5 h-5" />
+                            Execute kNN Search
+                          </>
+                        )}
+                      </>
+                    )}
+                  </span>
+                  <div className="absolute inset-0 bg-gradient-to-r from-primary-light to-accent-light opacity-0 group-hover:opacity-100 transition-opacity" />
+                </button>
+              </div>
+            ) : (
+              <div className="flex justify-center mb-8">
+                <button
+                  onClick={performCustomQuery}
+                  disabled={isLoading || !customQuery.trim()}
+                  className="group relative px-8 py-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:bg-gray-700 text-white font-semibold rounded-lg overflow-hidden transition-all duration-300 disabled:cursor-not-allowed"
+                >
+                  <span className="relative z-10 flex items-center gap-2">
+                    {isLoading ? (
+                      <>
+                        <RotateCw className="w-5 h-5 animate-spin" />
+                        Executing...
+                      </>
+                    ) : (
+                      <>
+                        <Code className="w-5 h-5" />
+                        Execute Custom Query
+                      </>
+                    )}
+                  </span>
+                  <div className="absolute inset-0 bg-gradient-to-r from-purple-400 to-pink-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                </button>
+              </div>
+            )}
 
             {/* Loading State */}
             {isLoading && (
@@ -424,6 +585,23 @@ export function LiveDemo() {
                   <div>
                     <p className="text-red-400 font-semibold">Search Failed</p>
                     <p className="text-gray-400 text-sm mt-1">{error}</p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Custom Query Error State */}
+            {customQueryError && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/20"
+              >
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-red-400 font-semibold">Custom Query Failed</p>
+                    <p className="text-gray-400 text-sm mt-1">{customQueryError}</p>
                   </div>
                 </div>
               </motion.div>
@@ -556,6 +734,14 @@ export function LiveDemo() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {/* Waterfall Timeline for Hybrid Search */}
+                {isHybridMode && response.timingBreakdown && response.timingBreakdown.length > 0 && (
+                  <WaterfallTimeline
+                    timingBreakdown={response.timingBreakdown}
+                    totalLatency={response.latency}
+                  />
                 )}
 
                 {/* Show ES Request Button */}
@@ -810,6 +996,92 @@ export function LiveDemo() {
                   >
                     <RotateCw className="w-4 h-4" />
                     Try Again
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Custom Query Results */}
+            {customResponse && !showConfirm && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-6"
+              >
+                {/* Success Header */}
+                <div className="flex items-center justify-between p-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+                    <div>
+                      <p className="text-emerald-400 font-semibold">Custom Query Completed</p>
+                      <p className="text-gray-400 text-sm">
+                        Found {customResponse.totalHits || 0} total hits • Latency: {customResponse.latency || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Results Display */}
+                <div className="p-4 rounded-lg bg-black/50 border border-gray-700">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-sm font-mono text-gray-400">Response JSON</p>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(JSON.stringify(customResponse.results, null, 2));
+                      }}
+                      className="text-xs text-primary hover:text-primary-light"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <pre className="bg-black/80 rounded p-4 text-xs text-green-400 overflow-x-auto max-h-96 overflow-y-auto">
+                    {JSON.stringify(customResponse.results, null, 2)}
+                  </pre>
+                </div>
+
+                {/* Hits List */}
+                {customResponse.results?.hits?.hits && (
+                  <div className="space-y-3">
+                    <h3 className="text-sm font-mono text-gray-400">Results ({customResponse.results.hits.hits.length})</h3>
+                    {customResponse.results.hits.hits.map((hit: any, index: number) => (
+                      <div key={hit._id} className="border border-gray-700 rounded-lg overflow-hidden">
+                        <div className="p-4 bg-white/5">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center">
+                                <span className="text-purple-400 font-bold text-sm">{index + 1}</span>
+                              </div>
+                              <div>
+                                <p className="text-white font-semibold font-mono">{hit._source?.id || hit._id}</p>
+                                <p className="text-gray-500 text-sm">{hit._source?.category || 'N/A'}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-purple-400 font-semibold font-mono">
+                                {hit._score?.toFixed(4) || 'N/A'}
+                              </p>
+                              <p className="text-gray-500 text-xs">SCORE</p>
+                            </div>
+                          </div>
+                          {hit._source?.text && (
+                            <div className="mt-3 p-3 bg-black/30 rounded">
+                              <p className="text-gray-300 text-sm">{hit._source.text}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Try Again Button */}
+                <div className="flex justify-center">
+                  <button
+                    onClick={() => setCustomResponse(null)}
+                    className="px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-white rounded-lg transition-all duration-300 flex items-center gap-2"
+                  >
+                    <RotateCw className="w-4 h-4" />
+                    Execute Another Query
                   </button>
                 </div>
               </motion.div>

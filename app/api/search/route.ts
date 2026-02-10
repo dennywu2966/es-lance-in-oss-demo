@@ -1,27 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(exec);
-
-// Helper with timeout
-function execWithTimeout(command: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      reject(new Error(`Command timed out after ${timeout}ms`));
-    }, timeout);
-
-    const proc = exec(command, (error, stdout, stderr) => {
-      clearTimeout(timer);
-      if (error) {
-        reject(error);
-      } else {
-        resolve({ stdout, stderr });
-      }
-    });
-  });
-}
+import { ES_HOST as CONFIG_ES_HOST, ES_AUTH as CONFIG_ES_AUTH, ES_SECURITY_ENABLED } from "@/entities/search/model/config";
+import { getTracer, SpanStatusCode, SpanKind, trace, context } from "@/lib/tracing";
+import { traceAsync } from "@/lib/tracing-utils";
 
 interface SearchRequest {
   dataset?: string;
@@ -37,13 +17,7 @@ interface LanceSearchResult {
   vector: number[];
   category: string;
   distance: number;
-}
-
-interface LanceSearchOutput {
-  results: LanceSearchResult[];
-  vectorsCount: number;
-  dimensions: number;
-  timing?: { [key: string]: number };
+  text?: string;
 }
 
 interface ESTimingData {
@@ -59,7 +33,9 @@ interface ESProfileResponse {
       _id: string;
       _score: number;
       _source: {
+        id?: string;
         category?: string;
+        text?: string;
       };
     }>;
   };
@@ -81,214 +57,19 @@ interface ESProfileResponse {
   };
 }
 
-// Search against Lance dataset using Python (original method)
-async function searchLanceDataset(
-  dataset: string,
-  queryVector: number[],
-  k: number,
-  numCandidates: number,
-  profile: boolean = false
-): Promise<LanceSearchOutput> {
-  const tempDir = `/tmp/lance-search-${Date.now()}`;
+// Generate a random normalized vector of 768 dimensions (for embedding queries)
+function generateRandomVector(dimensions: number = 768): number[] {
+  const vector: number[] = [];
+  for (let i = 0; i < dimensions; i++) {
+    vector.push(Math.random());
+  }
 
-  const profileFlag = profile ? 'True' : 'False';
-
-  const pythonScript = `
-import os
-import sys
-import json
-import time
-import numpy as np
-
-# Clear proxy settings FIRST before any imports
-for var in list(os.environ.keys()):
-    if 'proxy' in var.lower():
-        del os.environ[var]
-
-import oss2
-import lance
-
-# Profile flag
-PROFILE = ${profileFlag}
-
-# Timing dictionary
-timing = {}
-
-# OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
-
-# Dataset path in OSS
-temp_dir = "${tempDir}"
-dataset_name = "${dataset}"
-oss_prefix = f"datasets/{dataset_name}/"
-
-# Timing: OSS download
-if PROFILE:
-    start = time.time()
-
-# Download dataset from OSS
-os.makedirs(temp_dir, exist_ok=True)
-
-result = bucket.list_objects(prefix=oss_prefix)
-for obj in result.object_list:
-    if not obj.key.endswith('/'):
-        relative_path = obj.key.replace(oss_prefix, '')
-        local_file = os.path.join(temp_dir, relative_path)
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        object_data = bucket.get_object(obj.key)
-        with open(local_file, 'wb') as f:
-            f.write(object_data.read())
-
-if PROFILE:
-    timing['oss_download_ms'] = int((time.time() - start) * 1000)
-
-# Timing: Dataset open
-if PROFILE:
-    start = time.time()
-
-# Open Lance dataset
-dataset = lance.dataset(temp_dir)
-
-# Get metadata
-vectors_count = dataset.count_rows()
-schema = dataset.schema
-
-# Get vector dimensions
-vector_dim = None
-for field in schema:
-    if field.name == 'vector':
-        if hasattr(field.type, 'list_size'):
-            vector_dim = field.type.list_size
-
-if PROFILE:
-    timing['dataset_open_ms'] = int((time.time() - start) * 1000)
-
-# Timing: Query preparation
-if PROFILE:
-    start = time.time()
-
-# Query vector (normalized)
-query_vec = np.array(${JSON.stringify(queryVector)}, dtype=np.float32)
-if np.linalg.norm(query_vec) > 0:
-    query_vec = query_vec / np.linalg.norm(query_vec)
-
-if PROFILE:
-    timing['query_prep_ms'] = int((time.time() - start) * 1000)
-
-# Perform kNN search using Lance
-try:
-    # Timing: Data load
-    if PROFILE:
-        start = time.time()
-
-    # Use Lance's built-in KNN search with IVF-PQ index
-    table = dataset.to_table()
-
-    # Convert to dict for processing
-    data = table.to_pydict()
-
-    if PROFILE:
-        timing['data_load_ms'] = int((time.time() - start) * 1000)
-        # Timing: Similarity calculation
-        start = time.time()
-
-    # Calculate cosine similarity for all vectors
-    similarities = []
-    for i in range(len(data['_id'])):
-        vec_data = data['vector'][i]
-        if hasattr(vec_data, 'as_py'):
-            vec_data = vec_data.as_py()
-
-        vec = np.array(vec_data, dtype=np.float32)
-
-        # Normalize
-        if np.linalg.norm(vec) > 0:
-            vec = vec / np.linalg.norm(vec)
-
-        # Cosine similarity = dot product of normalized vectors
-        similarity = float(np.dot(query_vec, vec))
-        similarities.append((similarity, i))
-
-    if PROFILE:
-        timing['similarity_calc_ms'] = int((time.time() - start) * 1000)
-        # Timing: Sorting
-        start = time.time()
-
-    # Sort by similarity (highest first) and take top k
-    similarities.sort(reverse=True, key=lambda x: x[0])
-    top_k = min(${k}, len(similarities))
-    top_results = similarities[:top_k]
-
-    if PROFILE:
-        timing['sorting_ms'] = int((time.time() - start) * 1000)
-        # Timing: Result formatting
-        start = time.time()
-
-    results = []
-    for similarity, idx in top_results:
-        doc_id = data['_id'][idx]
-        if hasattr(doc_id, 'as_py'):
-            doc_id = doc_id.as_py()
-
-        vec_data = data['vector'][idx]
-        if hasattr(vec_data, 'as_py'):
-            vec_data = vec_data.as_py()
-
-        category_data = data['category'][idx]
-        if hasattr(category_data, 'as_py'):
-            category_data = category_data.as_py()
-
-        results.append({
-            'id': doc_id,
-            'vector': vec_data.tolist() if hasattr(vec_data, 'tolist') else list(vec_data),
-            'category': category_data,
-            'distance': similarity
-        })
-
-    if PROFILE:
-        timing['result_format_ms'] = int((time.time() - start) * 1000)
-        # Total search time (excluding cleanup)
-        timing['total_search_ms'] = sum(v for k, v in timing.items() if k.endswith('_ms') and isinstance(v, int))
-
-except Exception as e:
-    print(f"Search error: {e}", file=sys.stderr, flush=True)
-    results = []
-    if PROFILE:
-        timing['error'] = str(e)
-
-# Timing: Cleanup
-if PROFILE:
-    start = time.time()
-
-# Cleanup
-import shutil
-shutil.rmtree(temp_dir, ignore_errors=True)
-
-if PROFILE:
-    timing['cleanup_ms'] = int((time.time() - start) * 1000)
-
-output = {
-    'results': results,
-    'vectorsCount': vectors_count,
-    'dimensions': vector_dim or 0
-}
-
-if PROFILE:
-    output['timing'] = timing
-
-print(json.dumps(output))
-`;
-
-  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000);
-
-  const parsed = JSON.parse(stdout.trim()) as LanceSearchOutput;
-  return {
-    results: parsed.results,
-    vectorsCount: parsed.vectorsCount,
-    dimensions: parsed.dimensions,
-    timing: parsed.timing
-  };
+  // Normalize to unit length
+  const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
+  if (magnitude > 0) {
+    return vector.map(val => val / magnitude);
+  }
+  return vector;
 }
 
 // Search through Elasticsearch with Lance plugin and profiling
@@ -296,30 +77,42 @@ async function searchThroughElasticsearch(
   queryVector: number[],
   k: number,
   numCandidates: number,
-  profile: boolean
+  profile: boolean,
+  esIndex?: string
 ): Promise<{ results: LanceSearchResult[]; timing?: ESTimingData; vectorsCount: number; dimensions: number }> {
-  const ES_HOST = process.env.ES_HOST || 'http://localhost:9200';
-  const ES_INDEX = process.env.ES_INDEX || 'lance-validation-test';
+  const ES_HOST = process.env.ES_HOST || CONFIG_ES_HOST;
+  const ES_INDEX = esIndex || process.env.ES_INDEX || 'lance-validation-test';
 
-  // Build Elasticsearch kNN query with profile
+  // Ignore self-signed certificates for local ES
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  try {
+  // Build Elasticsearch Lance kNN query with profile
   const queryBody = {
     profile: profile,
-    knn: {
-      field: "embedding",
-      query_vector: queryVector,
-      k: k,
-      num_candidates: numCandidates
+    query: {
+      lance_knn: {
+        field: "embedding",
+        query_vector: queryVector,
+        k: k,
+        num_candidates: numCandidates
+      }
     },
     size: k,
-    _source: ["category"] // Only fetch category from source
+    _source: ["id", "category", "text"] // Fetch text field for document display
   };
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (ES_SECURITY_ENABLED) {
+    headers['Authorization'] = `Basic ${CONFIG_ES_AUTH}`;
+  }
 
   const response = await fetch(`${ES_HOST}/${ES_INDEX}/_search`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${Buffer.from('elastic-admin:elastic-password').toString('base64')}`
-    },
+    headers,
     body: JSON.stringify(queryBody)
   });
 
@@ -334,6 +127,7 @@ async function searchThroughElasticsearch(
     id: hit._id,
     vector: [], // Vector is stored in Lance, not in ES document
     category: hit._source?.category || 'unknown',
+    text: hit._source?.text || '',
     distance: 1 - hit._score // Convert cosine similarity to distance
   }));
 
@@ -343,12 +137,28 @@ async function searchThroughElasticsearch(
     timing = {};
     const queries = data.profile.shards[0].searches[0].query;
     for (const query of queries) {
+      // Add query type info
+      if (query.type) {
+        timing['query_type'] = query.type;
+      }
+      // Add query time in ms
+      if (query.time_in_nanos) {
+        timing['lance_query_ms'] = Math.round(query.time_in_nanos / 1_000_000);
+      }
+      // Add debug info if available
       if (query.debug) {
         Object.assign(timing, query.debug);
       }
+      // Add breakdown metrics (convert nanos to ms)
       if (query.breakdown) {
         for (const [key, value] of Object.entries(query.breakdown)) {
-          timing[key] = Math.round(value / 1_000_000); // Convert nanos to ms
+          const msValue = Math.round(value / 1_000_000);
+          // Format key name for display
+          const displayKey = key
+            .split('_')
+            .map((word: string) => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
+          timing[displayKey] = msValue;
         }
       }
     }
@@ -361,102 +171,44 @@ async function searchThroughElasticsearch(
     vectorsCount: data.hits.total.value,
     dimensions: queryVector.length
   };
-}
-
-// Get a random vector from the dataset to use as query
-async function getRandomVector(dataset: string): Promise<{ vector: number[]; vectorsCount: number; dimensions: number }> {
-  const tempDir = `/tmp/lance-random-${Date.now()}`;
-
-  const pythonScript = `
-import os
-import sys
-import json
-import random
-
-# Clear proxy settings FIRST before any imports
-for var in list(os.environ.keys()):
-    if 'proxy' in var.lower():
-        del os.environ[var]
-
-import oss2
-import lance
-
-# OSS credentials (from environment)
-auth = oss2.Auth(os.environ["OSS_ACCESS_KEY_ID"], os.environ["OSS_ACCESS_KEY_SECRET"])
-bucket = oss2.Bucket(auth, os.environ.get("OSS_REGION", "oss-ap-southeast-1") + ".aliyuncs.com", os.environ.get("OSS_BUCKET", "denny-test-lance"))
-
-temp_dir = "${tempDir}"
-dataset_name = "${dataset}"
-oss_prefix = f"datasets/{dataset_name}/"
-
-# Download dataset from OSS
-os.makedirs(temp_dir, exist_ok=True)
-result = bucket.list_objects(prefix=oss_prefix)
-for obj in result.object_list:
-    if not obj.key.endswith('/'):
-        relative_path = obj.key.replace(oss_prefix, '')
-        local_file = os.path.join(temp_dir, relative_path)
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        object_data = bucket.get_object(obj.key)
-        with open(local_file, 'wb') as f:
-            f.write(object_data.read())
-
-dataset = lance.dataset(temp_dir)
-
-# Get metadata
-vectors_count = dataset.count_rows()
-schema = dataset.schema
-
-# Get vector dimensions
-vector_dim = None
-for field in schema:
-    if field.name == 'vector':
-        if hasattr(field.type, 'list_size'):
-            vector_dim = field.type.list_size
-
-# Get a random vector
-random_idx = random.randint(0, min(vectors_count - 1, 100))
-table = dataset.take([random_idx])
-data = table.to_pydict()
-
-vec_data = data['vector'][0]
-if hasattr(vec_data, 'as_py'):
-    vec_data = vec_data.as_py()
-
-vector = vec_data.tolist() if hasattr(vec_data, 'tolist') else list(vec_data)
-
-# Cleanup
-import shutil
-shutil.rmtree(temp_dir, ignore_errors=True)
-
-print(json.dumps({
-    'vector': vector,
-    'vectorsCount': vectors_count,
-    'dimensions': vector_dim or 0
-}))
-`;
-
-  const { stdout } = await execWithTimeout(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`, 60000);
-
-  return JSON.parse(stdout.trim());
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
+  }
 }
 
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
+  const tracer = getTracer();
 
-  try {
-    const body = await req.json() as SearchRequest;
-    const k = body.k || 5;
-    const numCandidates = body.numCandidates || k * 2;
-    const profile = body.profile || false;
-    const useExistingVector = body.useExistingVector || false;
+  // Create root span for the entire search operation
+  const rootSpan = tracer.startSpan('lance.search.knn', {
+    kind: SpanKind.SERVER,
+    attributes: {
+      'http.method': 'POST',
+      'http.url': '/api/search',
+    },
+  });
+
+  return context.with(trace.setSpan(context.active(), rootSpan), async () => {
+    try {
+      const body = await req.json() as SearchRequest;
+      const k = body.k || 5;
+      const numCandidates = body.numCandidates || k * 2;
+      const profile = body.profile || false;
+      const useExistingVector = body.useExistingVector || false;
+
+      rootSpan.setAttribute('search.k', k);
+      rootSpan.setAttribute('search.num_candidates', numCandidates);
+      rootSpan.setAttribute('search.profile', profile);
 
     // Get the latest dataset if not specified
     let dataset = body.dataset;
     if (!dataset) {
       // Try to get list of datasets and use the latest one
+      // Use localhost with the current port (may differ from 3000 in dev)
       try {
-        const listRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/vectors/list`);
+        const port = process.env.PORT || 3001;
+        const listRes = await fetch(`http://localhost:${port}/api/vectors/list`);
         if (listRes.ok) {
           const listData = await listRes.json();
           if (listData.success && listData.datasets.length > 0) {
@@ -485,40 +237,69 @@ export async function POST(req: NextRequest) {
     let queryVector: number[];
     if (body.queryVector && body.queryVector.length > 0) {
       queryVector = body.queryVector;
-    } else if (!useExistingVector) {
-      // Get a random vector from the dataset to use as query
-      const randomVecData = await getRandomVector(dataset);
-      queryVector = randomVecData.vector;
     } else {
-      // Get a random vector as fallback
-      const randomVecData = await getRandomVector(dataset);
-      queryVector = randomVecData.vector;
+      // Generate a random normalized vector for querying
+      queryVector = generateRandomVector(768);
     }
 
-    // Choose search method based on profile parameter
-    // Note: Currently only Python search returns timing data
-    // ES search will be available once Lance plugin Profile API integration is complete
+    // Use ES lance_knn for fast vector search
+    // ES Lance plugin caches dataset connections for optimal performance
     let searchResults: {
       results: LanceSearchResult[];
-      timing?: ESTimingData;
+      timing?: ESTimingData | { [key: string]: number };
       vectorsCount: number;
       dimensions: number;
     };
 
-    // Use Lance Python search with profiling support
-    const lanceResults = await searchLanceDataset(
-      dataset,
-      queryVector,
-      k,
-      numCandidates,
-      profile
-    );
-    searchResults = {
-      results: lanceResults.results,
-      vectorsCount: lanceResults.vectorsCount,
-      dimensions: lanceResults.dimensions,
-      timing: lanceResults.timing
-    };
+    // Try ES lance_knn search first (fast - 30-100ms with cached connection)
+    // Use dataset name as ES index (sanitized for ES naming rules)
+    // Note: backfill creates indices with 'lance-ds-' prefix
+    const sanitizedDatasetName = dataset.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const esIndex = `lance-ds-${sanitizedDatasetName}`;
+    rootSpan.setAttribute('es.index', esIndex);
+
+    try {
+      // Trace ES kNN search
+      searchResults = await traceAsync(
+        'elasticsearch.search.knn',
+        async (esSpan) => {
+          esSpan.setAttribute('es.index', esIndex);
+          esSpan.setAttribute('search.k', k);
+          esSpan.setAttribute('search.num_candidates', numCandidates);
+
+          const result = await searchThroughElasticsearch(
+            queryVector,
+            k,
+            numCandidates,
+            profile,
+            esIndex
+          );
+
+          esSpan.setAttribute('es.hits_count', result.results.length);
+          if (result.timing?.total_query_ms) {
+            esSpan.setAttribute('es.took_ms', Number(result.timing.total_query_ms));
+          }
+
+          return result;
+        },
+        { kind: SpanKind.CLIENT }
+      );
+    } catch (esError: any) {
+      // NO Python fallback - search must go through ES lance_knn plugin
+      // If ES index doesn't exist, user must run backfill first
+      const isIndexNotFound = esError.message?.includes('404') ||
+                             esError.message?.includes('index_not_found') ||
+                             esError.message?.includes('index_not_found_exception');
+
+      if (isIndexNotFound) {
+        throw new Error(
+          `ES index "${esIndex}" not found. ` +
+          `Please run backfill first: POST /api/vectors/backfill with dataset="${dataset}" ` +
+          `to create the ES index with lance_vector field.`
+        );
+      }
+      throw esError;
+    }
 
     const latency = Date.now() - startTime;
 
@@ -526,10 +307,21 @@ export async function POST(req: NextRequest) {
     const results = searchResults.results.map((r, idx) => ({
       id: r.id,
       category: r.category,
+      text: r.text || '',
       score: r.distance, // Cosine similarity from Lance Python
       index: dataset,
       vector: r.vector,
     }));
+
+    // Set final span attributes
+    rootSpan.setAttribute('search.results_count', results.length);
+    rootSpan.setAttribute('dataset.vectors', searchResults.vectorsCount);
+    rootSpan.setAttribute('dataset.dimensions', searchResults.dimensions);
+    rootSpan.setAttribute('http.status_code', 200);
+    rootSpan.setStatus({ code: SpanStatusCode.OK });
+
+    // Include trace ID in response for debugging
+    const traceId = rootSpan.spanContext().traceId;
 
     return NextResponse.json({
       success: true,
@@ -541,17 +333,29 @@ export async function POST(req: NextRequest) {
       datasetName: dataset,
       vectorsCount: searchResults.vectorsCount,
       timing: searchResults.timing,
+      traceId, // Include trace ID for Kibana lookup
     });
   } catch (error: any) {
     console.error("Search error:", error);
+    rootSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: error.message || 'Search failed',
+    });
+    rootSpan.recordException(error instanceof Error ? error : new Error(String(error)));
+    rootSpan.setAttribute('http.status_code', 500);
+
     return NextResponse.json(
       {
         success: false,
         error: error.message || "Search failed",
         results: [],
         latency: "N/A",
+        traceId: rootSpan.spanContext().traceId,
       },
       { status: 500 }
     );
+  } finally {
+    rootSpan.end();
   }
+  }); // End of context.with
 }

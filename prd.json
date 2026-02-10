@@ -1,0 +1,54 @@
+{
+  "projectName": "Enhanced Vector Search Demo - Lance + Elasticsearch Integration",
+  "branchName": "feature/vector-search-demo",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Generate fake documents with Jina embeddings",
+      "priority": 1,
+      "passes": true
+    },
+    {
+      "id": "US-002",
+      "title": "View full document content from Lance dataset",
+      "priority": 2,
+      "passes": true
+    },
+    {
+      "id": "US-003",
+      "title": "Backfill documents to Elasticsearch",
+      "priority": 3,
+      "passes": true
+    },
+    {
+      "id": "US-004",
+      "title": "Fusion search with query input",
+      "priority": 4,
+      "passes": true
+    },
+    {
+      "id": "US-005",
+      "title": "View/hide full document details in search results",
+      "priority": 5,
+      "passes": true
+    },
+    {
+      "id": "US-006",
+      "title": "Interactive Elasticsearch query editor",
+      "priority": 6,
+      "passes": true
+    },
+    {
+      "id": "US-007",
+      "title": "Waterfall timeline visualization of search performance",
+      "priority": 7,
+      "passes": true
+    },
+    {
+      "id": "US-008",
+      "title": "Consistent glass-morphism UI styling",
+      "priority": 8,
+      "passes": true
+    }
+  ]
+}

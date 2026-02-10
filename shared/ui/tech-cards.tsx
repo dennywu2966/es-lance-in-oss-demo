@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { Cpu, Zap, Cloud, GitMerge } from "lucide-react";
-import { techCards } from "@/lib/data";
-import { slideUp, staggerContainer } from "@/lib/animations";
+import { techCards } from "@/shared/lib/data";
+import { slideUp, staggerContainer } from "@/shared/lib/animations";
 
 export function TechCards() {
   return (

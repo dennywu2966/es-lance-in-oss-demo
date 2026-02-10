@@ -2,8 +2,8 @@
 
 import { motion } from "framer-motion";
 import { Database, Zap, Cpu, Archive, Cloud } from "lucide-react";
-import { architectureComponents } from "@/lib/data";
-import { slideUp } from "@/lib/animations";
+import { architectureComponents } from "@/shared/lib/data";
+import { slideUp } from "@/shared/lib/animations";
 
 export function Architecture() {
   return (
