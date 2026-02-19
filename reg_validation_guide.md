@@ -1,8 +1,8 @@
 # Regression Test & E2E Validation Guide
 ## Lance Vector Plugin Demo (es-lance-demo)
 
-**Last Updated:** 2026-02-05
-**Status:** ✅ All 8 API regression tests pass • UI kNN + Hybrid smoke tests pass
+**Last Updated:** 2026-02-15
+**Status:** ✅ API/UI regression coverage expanded with shard-aware append flow, NRT refresh validation, IA split pages, bilingual navigation, and light Kibana 9.x theme validation
 
 **Recent Migration Changes:**
 - Migrated from old `lance` package to new `lancedb` package (>= 0.27)
@@ -14,6 +14,13 @@
 - **NEW:** Restored Sample Documents and Backfill to ES features after FSD refactoring
 - **NEW:** LanceDB API migration for documents/backfill APIs
 - **NEW:** ES password reset to Summer11
+- **NEW:** UI theme system added (Aliyun-style default, Kibana 9.x optional switch with persistence)
+- **NEW:** Page IA refactor: `/` summary page, `/core-flow` for functional flow, `/solutions` for GTM narrative
+- **NEW:** Chinese routes added: `/zh`, `/zh/core-flow`, `/zh/solutions`
+- **NEW:** Kibana 9.x theme updated to light-style token baseline
+- **NEW:** Python backend append job API (`/api/v1/dataset/append`) with SSE progress
+- **NEW:** Vector Management UI supports **Append Vectors** with optional target shard selection
+- **NEW:** Append flow now re-syncs ES metadata index and triggers Lance refresh endpoint to guarantee search visibility
 
 ---
 
@@ -71,7 +78,7 @@ The `starter_project.sh` script automatically:
 }
 
 # Elasticsearch distribution
-../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT/
+../es-9.2.4-plugins-rt-scale/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT/
 ```
 
 ### Verify Prerequisites
@@ -121,7 +128,7 @@ cd /home/denny/projects/es-lance-demo
 
 ```bash
 # 1. Start Elasticsearch
-cd ../es-9.9.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
+cd /home/denny/projects/es-9.2.4-plugins-rt-scale/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
 
 # Set OSS env vars and start (Singapore region)
 export OSS_ACCESS_KEY_ID="YOUR_KEY"
@@ -133,7 +140,7 @@ export OSS_BUCKET="denny-test-lance"
 ./bin/elasticsearch -d -p elasticsearch.pid
 
 # 2. Start Next.js
-cd /home/denny/projects/es-lance-demo
+cd /home/denny/projects/es-lance-demo/.worktrees/demo-ui-nt-scale-plan
 npm run dev
 ```
 
@@ -163,17 +170,22 @@ curl -s http://localhost:3000/api/vectors/list | jq .
 
 ### 2. Generate New Dataset
 ```bash
+# Compatibility: generation API must accept `shards`, `shard_count`, and `shardCount`
 curl -s -X POST http://localhost:3000/api/vectors/generate \
   -H "Content-Type: application/json" \
-  -d '{"vectors": 100, "dims": 128}' | jq .
+  -d '{"vectors": 30, "dims": 128, "shards": 4, "shardingStrategy": "ES_ROUTING"}' | jq .
 
 # Expected (after 30-60 seconds):
 {
   "success": true,
-  "dataset": "vectors-100-dims-128-TIMESTAMP",
-  "vectors": 100,
-  "dims": 128
+  "dataset": "vectors-30-dims-128-shards-4-es-routing-TIMESTAMP",
+  "vectors": 30,
+  "dims": 768,
+  "shardCount": 4
 }
+
+# Note: `dims` in response reflects embedding model output (currently 768).
+# Requested `dims` is kept in dataset naming for compatibility.
 ```
 
 **Note:** Generation takes 30-60 seconds due to:
@@ -181,6 +193,95 @@ curl -s -X POST http://localhost:3000/api/vectors/generate \
 - Jina API embeddings generation
 - Lance dataset creation with IVF-PQ indexing
 - OSS upload
+
+### 2.1 Append Vectors to Existing Dataset (Shard-aware)
+```bash
+# Start append job via same-origin proxy (works even when :8000 is not browser-reachable)
+curl -s -X POST http://localhost:3000/api/vectors/append/start \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"vectors-30-dims-768-shards-4-es-routing-TIMESTAMP","vectors":6,"target_shard_id":2}' | jq .
+
+# Expected:
+# {
+#   "success": true,
+#   "job_id": "..."
+# }
+
+# Poll status until completed
+JOB_ID="<replace_with_job_id>"
+curl -s "http://localhost:3000/api/vectors/status/${JOB_ID}" | jq .
+
+# Expected completion fields:
+# .status == "completed"
+# .result.appended_vectors >= 1
+# .result.total_vectors >= .result.appended_vectors
+```
+
+**Validation Notes:**
+- For `ES_ROUTING` datasets with `target_shard_id`, append flow auto-adjusts generated IDs to match the selected shard routing.
+- Dataset name/path remains stable; append updates in-place and refreshes `dataset.meta.json`.
+- After append, run backfill (UI auto-sync does this) so new docs are searchable by both kNN and hybrid search.
+
+### 2.2 Append Visibility Contract (Backfill + NRT + ES Lance Search Path)
+```bash
+# Create temporary sharded dataset
+GEN=$(curl -s -X POST http://localhost:3000/api/vectors/generate \
+  -H "Content-Type: application/json" \
+  -d '{"vectors":6,"dims":128,"shards":3,"shardingStrategy":"ES_ROUTING"}')
+DATASET=$(echo "$GEN" | jq -r '.dataset')
+
+# Append to target shard
+APPEND=$(curl -s -X POST http://localhost:3000/api/vectors/append/start \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\",\"vectors\":4,\"target_shard_id\":1}")
+JOB_ID=$(echo "$APPEND" | jq -r '.job_id')
+
+# Wait for completion
+for _ in $(seq 1 180); do
+  STATUS_JSON=$(curl -s "http://localhost:3000/api/vectors/status/${JOB_ID}")
+  STATUS=$(echo "$STATUS_JSON" | jq -r '.status')
+  if [ "$STATUS" = "completed" ]; then
+    break
+  fi
+  if [ "$STATUS" = "failed" ]; then
+    echo "$STATUS_JSON" | jq .
+    exit 1
+  fi
+  sleep 2
+done
+echo "$STATUS_JSON" | jq '.status, .result.appended_vectors, .result.target_shard_id'
+
+# Re-backfill + refresh
+BF=$(curl -s -X POST http://localhost:3000/api/vectors/backfill \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\"}")
+ES_INDEX=$(echo "$BF" | jq -r '.esIndex')
+curl -s -X POST http://localhost:3000/api/lance/refresh \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\"}" | jq .
+
+# Verify appended documents are visible in ES
+curl -s -k -u elastic:Summer11 "https://127.0.0.1:9200/${ES_INDEX}/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"prefix":{"id":"doc_append_"}},"size":3}' \
+  | jq '.hits.total.value'
+
+# Verify kNN/hybrid still execute through Elasticsearch Lance query
+curl -s -X POST http://localhost:3000/api/search \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\",\"query\":\"append visibility validation\",\"k\":5,\"profile\":true,\"refreshState\":\"fresh\",\"shardingStrategy\":\"ES_ROUTING\"}" \
+  | jq '.success, .timing.query_type, .timing.lance_query_ms, .evidence'
+
+curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\",\"queryText\":\"append visibility validation\",\"k\":5,\"nprobes\":10,\"refreshState\":\"fresh\",\"shardingStrategy\":\"ES_ROUTING\"}" \
+  | jq '.success, .timingBreakdown, .evidence'
+
+# Cleanup temporary dataset (OSS + ES dataset index)
+curl -s -X POST http://localhost:3000/api/vectors/delete \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\"}" | jq .
+```
 
 ### 3. Fetch Documents
 ```bash
@@ -325,16 +426,16 @@ mcp__playwright__browser_click?ref=<EXECUTE_HYBRID_REF>
 // Performance timeline shows breakdown of all phases
 ```
 
-### Test 6: Add Vectors Modal
+### Test 6: Append Vectors Modal
 ```javascript
-// 1. Click "ADD VECTORS" button
-mcp__playwright__browser_click?ref=<ADD_VECTORS_BUTTON_REF>
+// 1. Click "Append Vectors" button
+mcp__playwright__browser_click?ref=<APPEND_VECTORS_BUTTON_REF>
 
 // 2. Verify modal appears
-// Expected: Shows "Add More Vectors" with:
-//   - "ADDITIONAL VECTORS" spinbutton (default 50)
-//   - "Current: X vectors" display
-//   - "New total: Y vectors" display
+// Expected: Shows "Append Vectors" with:
+//   - Target dataset display
+//   - "Vectors to Append" spinbutton
+//   - "Target Shard" selector when selected dataset has >1 shards
 ```
 
 ### Test 7: SAMPLE Button (View Random Vectors)
@@ -498,6 +599,33 @@ mcp__playwright__browser_click?ref=<SHOW_DOC_BUTTON_REF>
 // - /api/search route was updated to include "text" in _source
 // - ES documents store metadata with text field
 // - Lance vectors remain in OSS for efficient kNN search
+```
+
+### Test 17: UI Theme Switch (Aliyun Default ↔ Kibana 9.x) ✅ NEW
+```javascript
+// 1. Open homepage with clean localStorage
+mcp__playwright__browser_navigate?url=http://localhost:3000
+// Optional for deterministic default:
+// mcp__playwright__browser_evaluate?function=() => { localStorage.removeItem('demo_ui_theme'); location.reload(); }
+
+// 2. Verify default theme is Aliyun
+mcp__playwright__browser_evaluate?function=() => document.documentElement.getAttribute('data-ui-theme')
+// Expected: "aliyun"
+
+// 3. Switch to Kibana 9.x
+mcp__playwright__browser_click?ref=<KIBANA_THEME_BUTTON_REF>
+
+// 4. Verify runtime switch applied and persisted
+mcp__playwright__browser_evaluate?function=() => ({
+//   attr: document.documentElement.getAttribute('data-ui-theme'),
+//   stored: localStorage.getItem('demo_ui_theme')
+// })
+// Expected: { attr: "kibana", stored: "kibana" }
+
+// 5. Reload page and verify persisted theme
+mcp__playwright__browser_navigate?url=http://localhost:3000
+mcp__playwright__browser_evaluate?function=() => document.documentElement.getAttribute('data-ui-theme')
+// Expected: "kibana"
 ```
 
 ---
@@ -803,6 +931,61 @@ All datasets share the single ES index `lance-validation-test`. Sending a non-ex
 
 ---
 
+### Issue 21: Generated Dataset Not Reflected Immediately in Live Demo Selector
+**Symptom:** After a successful generate flow, Vector Management could show success but Live Demo still displayed the old dataset in "Search Dataset".
+**Root Cause:** Two separate issues combined:
+1. Dataset list requests could return cached responses (`/api/vectors/list`), so the freshly generated dataset was not immediately visible to the UI.
+2. Active-dataset sync event from Vector Management was emitted inside a React state updater, causing unstable cross-component updates. Also, Live Demo could receive active-dataset events before its local dataset catalog included the new dataset, then immediately revert selection.
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- `features/vector-mgmt/api/dataset-client.ts`
+  - List requests now use `cache: 'no-store'` + no-cache headers for both Python backend and Next API fallback.
+- `app/api/vectors/list/route.ts`
+  - Response now explicitly returns no-store/no-cache headers.
+- `features/vector-mgmt/ui/vector-management.tsx`
+  - Added refresh retry loop after generation until target dataset is visible.
+  - Moved active-dataset event dispatch to `useEffect` on `selectedDataset` (instead of dispatching inside state-updater callback).
+- `features/live-demo/ui/live-demo.tsx`
+  - On active-dataset event, now also retries dataset-list refresh with target dataset preference, preventing immediate revert to stale selection.
+- `tests/dataset-client.test.ts`
+  - Added regression tests to verify list requests enforce no-store cache behavior.
+
+**Regression guard:** Generate a new dataset (`4 shards + ES_ROUTING`) and verify all of the following without manual refresh:
+1. New dataset appears in Vector Management list.
+2. New dataset becomes active in Vector Management.
+3. Live Demo "Search Dataset" summary updates to the same new dataset.
+
+---
+
+### Issue 22: UI Style Baseline + Runtime Theme Switching
+**Symptom:** Demo UI was fixed to a single dark visual style; users could not align default look with Aliyun branding or switch to Kibana-like visuals.
+**Root Cause:** No global theme state/persistence; colors were mostly static utility values.
+**Status:** ✅ FIXED
+
+**Fix Applied:**
+- Added global theme tokens in `app/globals.css` with:
+  - `:root[data-ui-theme='aliyun']` as default
+  - `:root[data-ui-theme='kibana']` as optional runtime style
+- Added `UiThemeProvider` and `UiThemeSwitcher`:
+  - Default theme: `aliyun`
+  - Runtime toggle: `Aliyun` / `Kibana 9.x`
+  - Persisted in `localStorage` key `demo_ui_theme`
+- Updated `app/layout.tsx` to wire provider/switcher globally.
+- Updated `tailwind.config.ts` and semantic classes to consume CSS variable tokens for non-breaking theme adaptation.
+
+**Files Modified:**
+- `app/layout.tsx`
+- `app/globals.css`
+- `tailwind.config.ts`
+- `lib/ui-theme.ts`
+- `components/theme/ui-theme-provider.tsx`
+- `components/theme/ui-theme-switcher.tsx`
+- `tests/ui-theme.test.ts`
+- `tests/ui-theme-switcher.test.ts`
+
+---
+
 ## Regression Test Checklist
 
 Use this checklist for quick regression testing before committing changes.
@@ -850,10 +1033,45 @@ curl -s -X POST http://localhost:3000/api/vectors/sample \
 ```
 
 ### UI Smoke Tests (3 minutes)
-- [ ] Homepage loads without errors
-- [ ] Dataset list refreshes and shows datasets
-- [ ] DOCUMENTS button shows document list
-- [ ] ADD VECTORS button opens modal
+- [ ] Home page (`/`) loads concise summary and shows links to `/core-flow` and `/solutions`
+- [ ] Core flow page (`/core-flow`) loads without errors
+- [ ] Dataset list refreshes and shows datasets (on `/core-flow`)
+- [ ] DOCUMENTS button shows document list (on `/core-flow`)
+- [ ] Append Vectors button opens modal (on `/core-flow`)
+- [ ] Append flow (4 vectors, optional target shard) completes and shows sync success message
+- [ ] After append, kNN search and hybrid search return successful responses on the same dataset
+- [ ] Generate modal with 4 shards + ES_ROUTING starts without "Failed to fetch" (on `/core-flow`)
+- [ ] Generate progress card shows fine-grained progress updates and ETA text (`ETA: ...`)
+- [ ] After generation succeeds, newly generated dataset auto-becomes active and Live Demo "Search Dataset" auto-syncs to it (no manual refresh)
+- [ ] Solutions page (`/solutions`) shows audience cards, TTV section, and lighthouse section
+- [ ] Chinese routes (`/zh`, `/zh/core-flow`, `/zh/solutions`) load and language toggle switches correctly
+- [ ] Chinese → Docs → Back keeps Chinese landing (`/zh`) instead of falling back to `/`
+- [ ] Popup form controls are readable in light themes (input/select text and background have sufficient contrast)
+- [ ] Selecting a dataset in Vector Management updates Live Demo "Search Dataset" summary accordingly
+- [ ] Default theme is Aliyun style (`data-ui-theme="aliyun"` on clean localStorage)
+- [ ] Theme switcher can switch to Kibana 9.x (light palette) and persists after reload
+
+### IA + Bilingual Navigation Test (Playwright MCP)
+```javascript
+// 1) Home summary page
+mcp__playwright__browser_navigate?url=http://localhost:3000
+mcp__playwright__browser_snapshot
+// Expected: summary-style hero with links to Core Flow and Solutions
+
+// 2) Core flow page has functional controls
+mcp__playwright__browser_navigate?url=http://localhost:3000/core-flow
+mcp__playwright__browser_snapshot
+// Expected: buttons "Generate Dataset", "Execute kNN Search", dataset dropdown
+
+// 3) Solutions page has GTM content
+mcp__playwright__browser_navigate?url=http://localhost:3000/solutions
+mcp__playwright__browser_snapshot
+// Expected: audience mapping, TTV method, lighthouse sections
+
+// 4) Language toggle to Chinese
+mcp__playwright__browser_click?ref=<LANG_TOGGLE_REF>
+// Expected route: /zh/solutions (or matching current page in zh)
+```
 
 ### Generate Dataset Test (slow — ~30-60s, run separately)
 ```bash
@@ -861,10 +1079,214 @@ curl -s -X POST http://localhost:3000/api/vectors/sample \
 # Run ONLY when verifying generate flow; skip in fast smoke runs.
 curl -s -X POST http://localhost:3000/api/vectors/generate \
   -H "Content-Type: application/json" \
-  -d '{"vectors": 10, "dims": 768}' | jq .
-# Expected: {"success":true,"dataset":"vectors-10-dims-768-TIMESTAMP","vectors":10,"dims":768}
+  -d '{"vectors": 30, "dims": 128, "shards": 4, "shardingStrategy": "ES_ROUTING"}' | jq .
+# Expected: {"success":true,"dataset":"vectors-30-dims-128-shards-4-es-routing-TIMESTAMP","vectors":30,"dims":768,"shardCount":4}
 # If Jina returns 429, the retry logic should back off and eventually succeed.
 # Failure after retries: check Jina rate-limit quota at https://app.jina.ai/pricing
+```
+
+### Python Backend Reachability + CORS Test
+```bash
+# Backend health
+curl -s http://127.0.0.1:8000/health | jq .
+
+# CORS preflight from remote demo origin (replace origin if needed)
+curl -s -D - -o /tmp/demo_api15_preflight.out   -X OPTIONS http://127.0.0.1:8000/api/v1/dataset/generate   -H "Origin: http://47.236.247.55:3000"   -H "Access-Control-Request-Method: POST"   -H "Access-Control-Request-Headers: content-type"
+
+sed -n '1,30p' /tmp/demo_api15_preflight.out
+# Expected: 200 OK and access-control-allow-origin for the demo origin
+```
+
+### Playwright UI Generate Test (4 shards + ES_ROUTING)
+```python
+page.goto("http://localhost:3000/core-flow#vector-management")
+page.wait_for_timeout(1200)
+page.get_by_role("button", name="Generate Dataset").first.click()
+
+spins = page.get_by_role("spinbutton")
+spins.nth(0).fill("30")
+spins.nth(1).fill("128")
+spins.nth(2).fill("4")
+page.locator("#vector-management").get_by_role("combobox").first.select_option("ES_ROUTING")
+
+page.get_by_role("button", name="Start Generation").first.click(force=True)
+page.wait_for_timeout(3500)
+
+content = page.content()
+assert "Failed to fetch" not in content, "Generate still fails in browser"
+assert "Generating Dataset" in content or "running" in content.lower(), "Generate progress not visible"
+assert "ETA:" in content, "Generate ETA not shown"
+print("✓ UI generate flow healthy for 4 shards + ES_ROUTING")
+```
+
+### Playwright Language Persistence Test (ZH across pages)
+```python
+page.goto("http://localhost:3000/zh")
+page.wait_for_timeout(1000)
+
+# Enter docs from Chinese navigation
+page.get_by_role("link", name="文档").first.click()
+page.wait_for_timeout(1500)
+
+# Verify Back to Demo keeps zh context
+back_link = page.get_by_role("link", name="← Back to Demo")
+href = back_link.get_attribute("href")
+assert href == "/zh", f"Expected zh back link, got: {href}"
+back_link.click()
+page.wait_for_timeout(600)
+assert "/zh" in page.url(), f"Expected to stay on zh route, got: {page.url()}"
+print("✓ Language preference persists across docs navigation")
+```
+
+### Playwright Popup Input Contrast Test
+```python
+page.goto("http://localhost:3000/core-flow#vector-management")
+page.wait_for_timeout(1000)
+page.get_by_role("button", name="Generate Dataset").first.click()
+page.wait_for_timeout(400)
+
+# Ensure modal input/select controls are visible and editable
+spins = page.get_by_role("spinbutton")
+assert spins.count() >= 3, "Generate modal numeric inputs not visible"
+spins.nth(0).fill("30")
+spins.nth(1).fill("128")
+spins.nth(2).fill("3")
+page.locator("select").filter(has_text="ES_ROUTING").first.select_option("ES_ROUTING")
+print("✓ Popup inputs/select controls are readable and interactive")
+```
+
+### Playwright Dataset Selection Sync Test (Vector Management → Live Demo)
+```python
+page.goto("http://localhost:3000/core-flow#vector-management")
+page.wait_for_timeout(1500)
+
+# Click a non-active dataset "Select" button in vector management
+select_btn = page.get_by_role("button").filter(has_text="Select").first
+if select_btn.count() > 0:
+    select_btn.click()
+    page.wait_for_timeout(1000)
+
+# Live Demo summary must reflect selected dataset
+page.goto("http://localhost:3000/core-flow#live-demo")
+page.wait_for_timeout(1200)
+content = page.content()
+assert "Search Dataset" in content, "Search dataset section missing"
+assert "No dataset selected" not in content, "Dataset selection did not propagate to live demo"
+print("✓ Dataset selection syncs from Vector Management to Live Demo")
+```
+
+### Playwright Generated Dataset Auto-Sync Test (No Manual Refresh)
+```python
+page.goto("http://localhost:3000/core-flow#vector-management")
+page.wait_for_timeout(1200)
+page.get_by_role("button", name="Generate Dataset").first.click()
+
+spins = page.get_by_role("spinbutton")
+spins.nth(0).fill("8")
+spins.nth(1).fill("128")
+spins.nth(2).fill("3")
+page.locator("#vector-management").get_by_role("combobox").first.select_option("ES_ROUTING")
+page.get_by_role("button", name="Start Generation").first.click(force=True)
+
+# Wait for completion banner and extract generated dataset name
+page.get_by_text("Dataset generated:", exact=False).first.wait_for(timeout=120000)
+banner = page.get_by_text("Dataset generated:", exact=False).first.text_content()
+generated = banner.split("Dataset generated:")[1].split(" (")[0].strip()
+
+# Verify live demo summary auto-syncs without manual refresh
+summary = page.get_by_text("Search Dataset").locator("xpath=..").text_content()
+assert generated in summary, f"Expected live summary to include {generated}, got: {summary}"
+print("✓ Generated dataset auto-syncs to Live Demo selector")
+```
+
+### Playwright Append + Searchability Test (Shard-aware)
+```python
+page.goto("http://localhost:3000/core-flow#vector-management")
+page.wait_for_timeout(1200)
+
+# Ensure there is an active dataset card first, then open append modal.
+page.get_by_role("button", name="Append Vectors").first.click()
+page.wait_for_timeout(400)
+
+# Append a small batch for quick regression run.
+spins = page.get_by_role("spinbutton")
+spins.nth(0).fill("4")
+
+# If shard selector exists, set to shard-1 to validate targeted shard append path.
+selectors = page.locator("select")
+if selectors.count() > 0:
+    selectors.last.select_option("1")
+
+page.get_by_role("button", name="Start Append").first.click()
+
+# Wait for completion banner
+page.get_by_text("synchronized Elasticsearch index", exact=False).first.wait_for(timeout=120000)
+
+# Validate search still works via Elasticsearch endpoints
+page.goto("http://localhost:3000/core-flow#live-demo")
+page.wait_for_timeout(1000)
+page.get_by_role("button", name="Execute kNN Search").first.click()
+page.get_by_role("button", name="Confirm & Search").first.click()
+page.wait_for_timeout(2500)
+assert "Search Completed" in page.content()
+print("✓ Append vectors are searchable via ES kNN path")
+```
+
+### 4-Shard Backfill + Physical Layout Contract Test
+```bash
+# Verify generated dataset preserves shard_count through metadata, shard-aware mapping, and OSS physical layout.
+DATASET=$(curl -s http://localhost:3000/api/vectors/list \
+  | jq -r '.datasets[] | select((.shardCount // .shard_count) == 4) | .name' | head -n 1)
+
+test -n "$DATASET" || (echo "No 4-shard dataset found" && exit 1)
+
+BACKFILL_RESP=$(curl -s -X POST http://localhost:3000/api/vectors/backfill \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\"}")
+echo "$BACKFILL_RESP" | jq .
+# Expected: success=true and shard-aware storage settings are present.
+
+ES_INDEX=$(echo "$BACKFILL_RESP" | jq -r '.esIndex')
+test -n "$ES_INDEX" || (echo "No esIndex in backfill response" && exit 1)
+
+curl -s "https://localhost:9200/${ES_INDEX}/_mapping" -k -u elastic:Summer11 \
+  | jq '.[] .mappings.properties.embedding.storage | {uri_prefix, shard_path, dataset_name, sharding_strategy}'
+# Expected:
+# {
+#   "uri_prefix": "oss://<bucket>/datasets/<dataset>",
+#   "shard_path": "shard-{shard_id}",
+#   "dataset_name": "data.lance",
+#   "sharding_strategy": "ES_ROUTING"
+# }
+
+DATASET="${DATASET}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import oss2
+
+dataset = os.environ["DATASET"]
+creds = json.loads(Path.home().joinpath(".oss/credentials.json").read_text())
+auth = oss2.Auth(creds["access_key_id"], creds["access_key_secret"])
+bucket = oss2.Bucket(auth, creds["endpoint"], creds["bucket_name"])
+
+missing = []
+for shard_id in range(4):
+    prefix = f"datasets/{dataset}/shard-{shard_id}/data.lance/"
+    result = bucket.list_objects(prefix=prefix, max_keys=1)
+    if not result.object_list:
+        missing.append(prefix)
+
+if missing:
+    raise SystemExit(f"Missing shard dataset paths: {missing}")
+print("OK: 4 shard dataset paths exist in OSS")
+PY
+
+# Cleanup (must run after regression)
+curl -s -X POST http://localhost:3000/api/vectors/delete \
+  -H "Content-Type: application/json" \
+  -d "{\"dataset\":\"${DATASET}\"}" | jq .
+# Expected: success=true; OSS prefix and per-dataset ES index are cleaned.
 ```
 
 ### Hybrid Search 429-Resilience Test
@@ -889,6 +1311,8 @@ curl -s -X POST http://localhost:3000/api/search/hybrid \
 6. If either search returns results from the *previous* dataset, the backfill or cache-clear is broken
 
 ### All Interactive Features Validated ✅
+- ✅ **IA Split Pages** - Home summary on `/`, functional flow on `/core-flow`, GTM narrative on `/solutions`
+- ✅ **Chinese Version** - `/zh`, `/zh/core-flow`, `/zh/solutions` with section-preserving language switch
 - ✅ Hybrid Search (Text + Vector Fusion) - Fully working
 - ✅ Show ES Request - Displays both BM25 and lance_knn queries
 - ✅ Show Vector - Loads and displays vector data from OSS
@@ -900,6 +1324,7 @@ curl -s -X POST http://localhost:3000/api/search/hybrid \
 - ✅ **Backfill to ES** - Creates ES index with lance_vector field pointing to OSS, with progress bar
 - ✅ **Modal z-index Fix** - Documents modal properly layered above main page (z-100)
 - ✅ **Dataset Switching** - Dropdown selection triggers forceRecreate backfill; both kNN and Hybrid search the switched dataset
+- ✅ **Theme Switching** - Default Aliyun style; one-click switch to Kibana 9.x light style; reload persistence via `demo_ui_theme`
 
 ---
 
@@ -931,7 +1356,7 @@ npm run dev
 curl -s -k -u elastic:Summer11 https://127.0.0.1:9200/_cluster/health
 
 # Restart ES if needed
-cd ../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
+cd ../es-9.2.4-plugins-rt-scale/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
 kill $(cat elasticsearch.pid 2>/dev/null)
 ./start_es_with_plugins.sh -d -p elasticsearch.pid
 ```
@@ -951,13 +1376,15 @@ python3 -m pip install numpy lance pyarrow --user
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     es-lance-demo                          │
-│                  (Next.js + React + Tailwind)                  │
+│                  (Next.js + React + Tailwind)              │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  Frontend (app/)                                      │  │
-│  │    ├─ Homepage (page.tsx)                            │  │
-│  │    ├─ Components/                                   │  │
+│  │    ├─ / (summary home)                               │  │
+│  │    ├─ /core-flow (functional path)                   │  │
+│  │    ├─ /solutions (GTM + branding path)               │  │
+│  │    ├─ /zh/* (Chinese mirrors)                        │  │
 │  │    └─ API Routes (app/api/)                         │  │
 │  │         ├─ /api/vectors/list                         │  │
 │  │         ├─ /api/vectors/generate                     │  │
@@ -974,17 +1401,18 @@ python3 -m pip install numpy lance pyarrow --user
 │  │    ├─ listDatasets() - list OSS datasets             │  │
 │  │    ├─ generateAndUploadDataset() - GLM+Jina+Python   │  │
 │  │    └─ deleteDataset() - delete from OSS             │  │
+│  │       /api/vectors/delete also cleans per-dataset ES index (lance-ds-*) │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                          │                                  │
 └───────────────────────────────────────────────────────────┘
                           │
          ┌─────────────────────────────────────────┐
-         │  Alibaba Cloud OSS                          │
+         │  Alibaba Cloud OSS                      │
          │  └── datasets/*.lance                      │
          └─────────────────────────────────────────┘
                           │
          ┌─────────────────────────────────────────┐
-         │  Elasticsearch (with Lance Vector Plugin)  │
+         │  Elasticsearch (with Lance Vector Plugin) │
          │  └── lance-validation-test index           │
          └─────────────────────────────────────────┘
 ```
@@ -999,7 +1427,12 @@ es-lance-demo/
 ├── lib/
 │   └── oss-client.ts            # OSS + Lance integration ✏️ MODIFIED
 ├── app/
-│   ├── page.tsx                 # Homepage component
+│   ├── page.tsx                 # Summary home page
+│   ├── core-flow/page.tsx       # Core functional flow page
+│   ├── solutions/page.tsx       # GTM/branding page
+│   ├── zh/page.tsx              # Chinese summary page
+│   ├── zh/core-flow/page.tsx    # Chinese core flow page
+│   ├── zh/solutions/page.tsx    # Chinese solutions page
 │   ├── globals.css              # Tailwind + custom styles
 │   └── api/
 │       ├── search/
@@ -1012,6 +1445,8 @@ es-lance-demo/
 │           ├── documents/
 │           │   └── route.ts      # Fetch documents ✏️ MODIFIED
 │           └── backfill/route.ts # Backfill to ES ✏️ MODIFIED
+├── docs/
+│   └── branding-saling-strategies.md # Branding + sales methodology ✨ NEW
 ├── reg_validation_guide.md    # This file ✏️ UPDATED
 └── CLAUDE.md                   # Project documentation
 ```
@@ -1019,6 +1454,23 @@ es-lance-demo/
 ---
 
 ## Change Log
+
+### 2026-02-14: IA Split + Bilingual + Kibana Light Refresh
+- ✅ Home page simplified to summary format (`/`)
+- ✅ Core functional controls moved to `/core-flow`
+- ✅ Non-core branding and GTM content isolated in `/solutions`
+- ✅ Chinese route set added (`/zh`, `/zh/core-flow`, `/zh/solutions`)
+- ✅ Added section-preserving language toggle in top navigation
+- ✅ Updated Kibana 9.x optional theme to light baseline tokens
+- ✅ Added strategy documentation: `docs/branding-saling-strategies.md`
+- ✅ Expanded regression checklist for IA and bilingual route validation
+
+### 2026-02-13: UI Theme System
+- ✅ Added Aliyun-style visual theme as default baseline
+- ✅ Added runtime theme switcher for Kibana 9.x style
+- ✅ Added localStorage persistence (`demo_ui_theme`)
+- ✅ Added unit tests for theme utility/provider/switch behavior
+- ✅ Added Playwright validation procedure for theme switching and persistence
 
 ### 2026-02-01: LanceDB API Migration Complete
 - ✅ **NEW: Migrated from `lance` to `lancedb` package (>= 0.27)**
@@ -1060,7 +1512,9 @@ OpenTelemetry tracing is implemented for kNN and hybrid search operations. Trace
 
 ### Trace Architecture
 ```
-Next.js App → OTEL SDK → Custom ES Exporter → Elasticsearch (traces-lance-*) → Kibana
+Next.js App/API → OTEL SDK → Custom ES Exporter → Elasticsearch (`traces-lance-spans-*`)
+                                                  ↘ Trace Tree Materialization API → Elasticsearch (`traces-lance-tree-*`)
+                                                  ↘ Demo UI (`/core-flow`) Trace Tree Viewer
 ```
 
 ### Key Files
@@ -1068,7 +1522,10 @@ Next.js App → OTEL SDK → Custom ES Exporter → Elasticsearch (traces-lance-
 |------|---------|
 | `lib/tracing.ts` | OTEL SDK initialization with ES exporter |
 | `lib/es-trace-exporter.ts` | Custom SpanExporter to Elasticsearch |
+| `lib/trace-debug.ts` | Debug-mode payload builder (request attempts, shard/OSS mapping) |
 | `lib/tracing-utils.ts` | Helper functions for creating spans |
+| `app/api/traces/tree/route.ts` | Reconstruct + persist hierarchical trace tree |
+| `features/live-demo/ui/trace-tree-viewer.tsx` | Foldable/expandable trace tree UI |
 | `instrumentation.ts` | Next.js instrumentation hook |
 
 ### Span Hierarchy
@@ -1089,103 +1546,129 @@ lance.search.hybrid (root)
 └── search.fusion.rrf (RRF fusion)
 ```
 
-### OTEL Test 1: Verify Trace Index Setup
-```bash
-# Check trace index template exists
-curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/_index_template/traces-lance-template" | jq '.index_templates[0].name'
-# Expected: "traces-lance-template"
+### Debug Mode Rule
+- Core default remains **false** (`LANCE_TRACE_DEBUG=false`): export lightweight span data only (trace/span ids, latency, status, basic attrs).
+- `starter_project.sh` enables debug on startup by default (`STARTER_ENABLE_TRACE_DEBUG=true`), and propagates:
+  - ES JVM property: `-Dlance.trace.debug=true`
+  - App env: `LANCE_TRACE_DEBUG=true`
+- Set `STARTER_ENABLE_TRACE_DEBUG=false` when you need low-overhead mode.
 
-# Check trace index exists
+### OTEL Test 1: Verify Trace Indices
+```bash
+# Raw span index
 curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/_cat/indices/traces-lance-*?v"
-# Expected: Shows traces-lance-* index with document count
+  "https://127.0.0.1:9200/_cat/indices/traces-lance-spans-*?v"
+# Expected: at least one traces-lance-spans-* index
+
+# Materialized tree index (generated by /api/traces/tree)
+curl -s -k -u elastic:Summer11 \
+  "https://127.0.0.1:9200/_cat/indices/traces-lance-tree-*?v"
+# Expected: appears after running OTEL Test 2/3
 ```
 
-### OTEL Test 2: kNN Search Generates Traces
+### OTEL Test 2: kNN Trace + Tree API
 ```bash
 # Execute kNN search
 curl -s -X POST http://localhost:3000/api/search \
   -H "Content-Type: application/json" \
-  -d '{"query": "machine learning", "k": 5}' | jq '.traceId'
+  -d '{"k": 5, "numCandidates": 10}' | jq '.traceId'
 # Expected: Returns a traceId (e.g., "abc123...")
 
-# Verify trace in ES (wait 2-3 seconds for batch export)
+# Resolve foldable tree for this trace and persist to traces-lance-tree-*
+TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"k": 5, "numCandidates": 10}' | jq -r '.traceId')
+
+curl -s "http://localhost:3000/api/traces/tree?traceId=${TRACE_ID}&persist=1" | jq .
+# Expected:
+# - success=true
+# - roots[0].name == "lance.search.knn"
+# - spanCount >= 2
+
 sleep 3
 curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/traces-lance-*/_search?size=1" \
+  "https://127.0.0.1:9200/traces-lance-spans-*/_search?size=1" \
   -H "Content-Type: application/json" \
-  -d '{"query":{"match":{"span.name":"lance.search.knn"}}}' | jq '.hits.total.value'
+  -d '{"query":{"term":{"name.keyword":"lance.search.knn"}}}' | jq '.hits.total.value'
 # Expected: >= 1
 ```
 
-### OTEL Test 3: Hybrid Search Generates Traces
+### OTEL Test 3: Hybrid Trace Tree Structure
 ```bash
-# Execute hybrid search
+# Execute hybrid search and retrieve tree
 curl -s -X POST http://localhost:3000/api/search/hybrid \
   -H "Content-Type: application/json" \
   -d '{"queryText": "vector database", "k": 5}' | jq '.traceId'
 # Expected: Returns a traceId
 
-# Verify trace spans
+TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"queryText": "vector database", "k": 5}' | jq -r '.traceId')
+
+curl -s "http://localhost:3000/api/traces/tree?traceId=${TRACE_ID}&persist=1" | jq '.roots[0].children[].name'
+# Expected child spans include:
+# - "jina.embedding.generate"
+# - "elasticsearch.search.bm25"
+# - "elasticsearch.search.knn"
+# - "search.fusion.rrf"
+
 sleep 3
 curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/traces-lance-*/_search" \
+  "https://127.0.0.1:9200/traces-lance-spans-*/_search" \
   -H "Content-Type: application/json" \
-  -d '{"query":{"match":{"span.name":"lance.search.hybrid"}}}' | jq '.hits.total.value'
+  -d '{"query":{"term":{"name.keyword":"lance.search.hybrid"}}}' | jq '.hits.total.value'
 # Expected: >= 1
 ```
 
-### OTEL Test 4: Verify Span Attributes
+### OTEL Test 4: Debug Payload Contains Shard + OSS Query Details
 ```bash
-# Check span has required attributes
-curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/traces-lance-*/_search?size=1" \
+# Precondition: starter launched with STARTER_ENABLE_TRACE_DEBUG=true
+TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search \
   -H "Content-Type: application/json" \
-  -d '{"query":{"match":{"span.name":"lance.search.knn"}}}' | jq '.hits.hits[0]._source.attributes'
-# Expected attributes:
-# - http.method: POST
-# - http.url: /api/search
-# - search.k: 5
-# - search.dataset: <dataset_name>
+  -d '{"k": 5, "numCandidates": 10, "profile": true}' | jq -r '.traceId')
+
+TREE=$(curl -s "http://localhost:3000/api/traces/tree?traceId=${TRACE_ID}&persist=1")
+echo "$TREE" | jq '.roots[0].events'
+
+# Expected in events payload (trace.debug_payload):
+# - request_attempts (actual ES request bodies attempted)
+# - oss_queries (resolved shard URI list)
+# - profile_snapshot (per-shard query debug/timing snapshot)
+# - shard_count / shard_ids
 ```
 
-### OTEL Test 5: Kibana Traces Visualization (Playwright MCP)
-```javascript
-// 1. Navigate to Kibana Discover
-mcp__playwright__browser_navigate?url=http://localhost:5601/app/discover
-
-// 2. Select "Lance Traces" data view
-mcp__playwright__browser_click?ref=<DATA_VIEW_SELECTOR>
-mcp__playwright__browser_click?ref=<LANCE_TRACES_OPTION>
-
-// 3. Verify traces visible
-// Expected: Documents with fields:
-//   - @timestamp
-//   - trace.id
-//   - span.name
-//   - span.duration_ms
-//   - service.name: "lance-demo"
-```
-
-### OTEL Test 6: Trace Parent-Child Relationships
+### OTEL Test 5: Debug Off = Lightweight Trace
 ```bash
-# Get a hybrid search trace
-TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search/hybrid \
-  -H "Content-Type: application/json" \
-  -d '{"queryText": "test", "k": 3}' | jq -r '.traceId')
+# Restart stack with lightweight mode:
+STARTER_ENABLE_TRACE_DEBUG=false ./starter_project.sh --skip-kibana
 
-sleep 3
-
-# Verify multiple spans with same trace ID
-curl -s -k -u elastic:Summer11 \
-  "https://127.0.0.1:9200/traces-lance-*/_search" \
+TRACE_ID=$(curl -s -X POST http://localhost:3000/api/search \
   -H "Content-Type: application/json" \
-  -d "{\"query\":{\"term\":{\"trace.id\":\"$TRACE_ID\"}}}" | jq '.hits.total.value'
-# Expected: >= 2 (root span + child spans)
+  -d '{"k": 5}' | jq -r '.traceId')
+
+curl -s "http://localhost:3000/api/traces/tree?traceId=${TRACE_ID}&persist=0" | jq '.roots[0].events'
+# Expected: no large trace.debug_payload event; tree still has span ids + durations.
 ```
 
-### Regression Test: No Tracing Overhead Impact
+### OTEL Test 6: UI Tree Folding/Expansion (Playwright MCP)
+```python
+page.goto("http://localhost:3000/core-flow")
+page.get_by_role("button", name="Execute kNN Search").first.click()
+page.wait_for_timeout(2500)
+
+# Trace tree card should appear with at least one node.
+assert "Trace Tree" in page.content()
+
+# Expand/collapse first node.
+first_toggle = page.locator("button").filter(has_text="lance.search").first
+first_toggle.click()
+page.wait_for_timeout(400)
+first_toggle.click()
+page.wait_for_timeout(400)
+print("✓ Trace tree fold/expand works")
+```
+
+### Regression Test: Tracing Overhead Bound
 ```bash
 # Ensure search still completes in reasonable time (< 5 seconds)
 time curl -s -X POST http://localhost:3000/api/search \
@@ -1195,13 +1678,14 @@ time curl -s -X POST http://localhost:3000/api/search \
 ```
 
 ### Tracing Validation Checklist
-- [ ] Trace index template created (`traces-lance-template`)
-- [ ] Traces exported to `traces-lance-*` index
+- [ ] Traces exported to `traces-lance-spans-*`
+- [ ] Trace trees persisted to `traces-lance-tree-*`
 - [ ] kNN search creates `lance.search.knn` spans
 - [ ] Hybrid search creates `lance.search.hybrid` spans
 - [ ] Child spans include: `jina.embedding.generate`, `elasticsearch.search.bm25`, `elasticsearch.search.knn`, `search.fusion.rrf`
-- [ ] Spans have correct attributes (http.method, search.k, etc.)
-- [ ] Traces visible in Kibana Discover with "Lance Traces" data view
+- [ ] `trace.debug_payload` event includes request attempts + shard/OSS details when debug is on
+- [ ] Lightweight mode has no heavy debug payload when debug is off
+- [ ] Demo UI trace tree supports hierarchical folding/expansion
 - [ ] No significant performance regression from tracing
 
 ---

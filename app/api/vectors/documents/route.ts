@@ -99,69 +99,93 @@ import pyarrow as pa
 dataset_path = "${tempDir}"
 limit = ${limit}
 
-# Open database using LanceDB (new API)
-db = lancedb.connect(dataset_path)
+def extract_table_names(db):
+    tables_response = db.list_tables()
+    if isinstance(tables_response, list):
+        return list(tables_response)
+    if hasattr(tables_response, 'tables'):
+        return list(tables_response.tables)
+    if hasattr(tables_response, 'names'):
+        return list(tables_response.names)
+    try:
+        return list(tables_response)
+    except Exception:
+        return []
 
-# Get table names - use table_names() which returns a simple list
-tables_response = db.list_tables()
-if isinstance(tables_response, list):
-    table_names = tables_response
-elif hasattr(tables_response, 'tables'):
-    table_names = tables_response.tables
-elif hasattr(tables_response, 'names'):
-    table_names = tables_response.names
-else:
-    table_names = list(tables_response)
+dataset_roots = []
+def add_root(path):
+    if path not in dataset_roots:
+        dataset_roots.append(path)
 
-if not table_names:
-    raise Exception("No tables found in LanceDB database")
+for entry in sorted(os.listdir(dataset_path)):
+    if not entry.startswith('shard-'):
+        continue
+    shard_dir = os.path.join(dataset_path, entry)
+    if os.path.isdir(os.path.join(shard_dir, 'data.lance')):
+        add_root(shard_dir)
+        add_root(os.path.join(shard_dir, 'data.lance'))
 
-# Open the first available table
-table = db.open_table(table_names[0])
+if not dataset_roots:
+    add_root(dataset_path)
+    legacy_root = os.path.join(dataset_path, 'data.lance')
+    if os.path.isdir(legacy_root):
+        add_root(legacy_root)
 
-# Get total count
-total = table.count_rows()
-
-# Load all documents and then slice if needed
-# Note: to_arrow() doesn't support columns or limit in new API
-arrow_table = table.to_arrow()
-data = arrow_table.to_pandas()
-
-# Apply limit if specified
-if limit > 0 and limit < len(data):
-    data = data.head(limit)
-
-# Select only the columns we need (exclude vector which can be large)
-columns_needed = ['_id', 'id', 'title', 'text', 'topic', 'category']
-# Check which columns exist in the data
-available_columns = [col for col in columns_needed if col in data.columns]
-data = data[available_columns]
-
-# Convert pandas DataFrame to list of dicts
+total = 0
 result = []
-for idx, row in data.iterrows():
-    # Helper function to convert pandas values safely
-    def to_string(val):
-        if val is None:
-            return ''
-        if hasattr(val, 'item'):
-            return str(val.item())
-        return str(val)
+opened_tables = 0
 
-    # Get value from row with fallback for missing columns
-    def get_val(column, default=''):
-        if column in row.index:
-            return to_string(row[column])
-        return default
+for root in dataset_roots:
+    try:
+        db = lancedb.connect(root)
+        table_names = extract_table_names(db)
+        if not table_names:
+            continue
 
-    result.append({
-        '_id': get_val('_id'),
-        'id': get_val('id', get_val('_id')),  # Fallback to _id if id doesn't exist
-        'title': get_val('title', ''),
-        'text': get_val('text', ''),
-        'topic': get_val('topic', 'general'),
-        'category': get_val('category', 'unknown')
-    })
+        table = db.open_table(table_names[0])
+        opened_tables += 1
+        total += int(table.count_rows())
+
+        # If limit is already reached, skip loading additional shard rows.
+        if limit > 0 and len(result) >= limit:
+            continue
+
+        data = table.to_arrow().to_pandas()
+        columns_needed = ['_id', 'id', 'title', 'text', 'topic', 'category']
+        available_columns = [col for col in columns_needed if col in data.columns]
+        if not available_columns:
+            continue
+        data = data[available_columns]
+
+        for _, row in data.iterrows():
+            def to_string(val):
+                if val is None:
+                    return ''
+                if hasattr(val, 'item'):
+                    return str(val.item())
+                return str(val)
+
+            def get_val(column, default=''):
+                if column in row.index:
+                    return to_string(row[column])
+                return default
+
+            result.append({
+                '_id': get_val('_id'),
+                'id': get_val('id', get_val('_id')),
+                'title': get_val('title', ''),
+                'text': get_val('text', ''),
+                'topic': get_val('topic', 'general'),
+                'category': get_val('category', 'unknown')
+            })
+
+            if limit > 0 and len(result) >= limit:
+                break
+    except Exception:
+        continue
+
+if opened_tables == 0:
+    raise Exception("No tables found in LanceDB database")
 
 # Output as JSON
 import json

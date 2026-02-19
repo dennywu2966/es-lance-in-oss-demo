@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="440" viewBox="0 0 1260 440">
+  <defs>
+    <style>
+      .h1 { font: 700 22px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .h2 { font: 700 16px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #1e293b; }
+      .t { font: 600 13px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #475569; }
+      .chip { font: 700 12px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .mono { font: 500 12px monospace; fill: #334155; }
+    </style>
+  </defs>
+
+  <rect width="1260" height="440" fill="#f8fbff"/>
+  <text x="32" y="44" class="h1">Result Card Mock: Feature Evidence First</text>
+
+  <rect x="24" y="70" width="1212" height="340" rx="14" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="48" y="112" class="h2">#1 doc_123   score: 0.9123   match: HYBRID</text>
+  <text x="48" y="138" class="t">摘要: 该文档解释了向量检索、过滤与分片策略协同优化路径。</text>
+
+  <rect x="48" y="160" width="210" height="30" rx="15" fill="#dcfce7"/>
+  <text x="72" y="180" class="chip">分片证据  shard=2/4</text>
+
+  <rect x="272" y="160" width="302" height="30" rx="15" fill="#dbeafe"/>
+  <text x="294" y="180" class="chip">过滤证据  prefilter=APPLIED</text>
+
+  <rect x="588" y="160" width="314" height="30" rx="15" fill="#fef3c7"/>
+  <text x="612" y="180" class="chip">NRT 证据  refreshed_at=16:22:31</text>
+
+  <rect x="916" y="160" width="274" height="30" rx="15" fill="#fee2e2"/>
+  <text x="938" y="180" class="chip">回退提示 fallback=false</text>
+
+  <text x="48" y="228" class="h2">Evidence Details</text>
+  <text x="48" y="254" class="mono">routing_strategy: ES_ROUTING</text>
+  <text x="48" y="276" class="mono">sql_filter: category = 'electronics'</text>
+  <text x="48" y="298" class="mono">lance.ext.nprobes: 20</text>
+  <text x="48" y="320" class="mono">pipeline: prefilter -> knn -> merge -> rerank</text>
+
+  <rect x="930" y="222" width="260" height="44" rx="10" fill="#2563eb"/>
+  <text x="1000" y="250" style="font:700 14px sans-serif; fill:#fff;">SHOW VECTOR</text>
+
+  <rect x="930" y="278" width="260" height="44" rx="10" fill="#0ea5e9"/>
+  <text x="1009" y="306" style="font:700 14px sans-serif; fill:#fff;">SHOW DOC</text>
+
+  <text x="48" y="368" class="t">Design note: 结果卡片顶部必须固定显示三类证据，保证演示时“一眼解释路径”。</text>
+</svg>

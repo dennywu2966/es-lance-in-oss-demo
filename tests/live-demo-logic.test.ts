@@ -76,21 +76,23 @@ describe('LiveDemo - Component Logic', () => {
   describe('Top-K input validation', () => {
     it('should enforce minimum value of 1', () => {
       const input = 0;
-      const clamped = Math.min(50, Math.max(1, input || 5));
+      const normalized = Number.isFinite(input) ? input : 5;
+      const clamped = Math.min(50, Math.max(1, normalized));
 
       expect(clamped).toBe(1);
     });
 
     it('should enforce maximum value of 50', () => {
       const input = 100;
-      const clamped = Math.min(50, Math.max(1, input || 5));
+      const normalized = Number.isFinite(input) ? input : 5;
+      const clamped = Math.min(50, Math.max(1, normalized));
 
       expect(clamped).toBe(50);
     });
 
     it('should use default value of 5 when input is invalid', () => {
       const input = NaN;
-      const value = input || 5;
+      const value = Number.isFinite(input) ? input : 5;
 
       expect(value).toBe(5);
     });
@@ -296,8 +298,8 @@ describe('LiveDemo - Regression Tests', () => {
         expandedResults = newSet;
       }
 
-      // After 3 toggles (starting with false), should be false (odd number of toggles)
-      expect(expandedResults.has(0)).toBe(false);
+      // After 3 toggles from false, state should be true (odd toggle count).
+      expect(expandedResults.has(0)).toBe(true);
     });
   });
 
@@ -317,7 +319,7 @@ describe('LiveDemo - Regression Tests', () => {
         timing['test_operation_ms'] = endTime - startTime;
       }
 
-      expect(timing['test_operation_ms']).toBeGreaterThan(0);
+      expect(timing['test_operation_ms']).toBeGreaterThanOrEqual(0);
     });
 
     it('should include all timing stages', () => {

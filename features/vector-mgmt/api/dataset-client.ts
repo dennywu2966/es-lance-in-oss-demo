@@ -2,7 +2,13 @@
  * Dataset API client for communicating with Python backend
  */
 
-const PYTHON_BACKEND_URL = process.env.PYTHON_BACKEND_URL || 'http://localhost:8000';
+const NO_STORE_FETCH_OPTIONS: RequestInit = {
+  cache: 'no-store',
+  headers: {
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+  },
+};
 
 export interface Dataset {
   name: string;
@@ -10,14 +16,33 @@ export interface Dataset {
   dims: number;
   size: string;
   last_modified: string;
+  shard_count?: number;
+  sharding_strategy?: 'NONE' | 'ES_ROUTING';
+  shard_path?: string;
+  dataset_name?: string;
+  uri_prefix?: string;
 }
 
 export interface DatasetGenerateRequest {
   vectors: number;
   dims: number;
+  shard_count?: number;
+  sharding_strategy?: 'NONE' | 'ES_ROUTING';
 }
 
 export interface DatasetGenerateResponse {
+  success: boolean;
+  job_id: string;
+  message: string;
+}
+
+export interface DatasetAppendRequest {
+  dataset: string;
+  vectors: number;
+  target_shard_id?: number;
+}
+
+export interface DatasetAppendResponse {
   success: boolean;
   job_id: string;
   message: string;
@@ -41,43 +66,18 @@ export interface JobStatus {
 }
 
 /**
- * List all datasets from Python backend
- * Falls back to Next.js API if Python backend is not configured or unavailable
+ * List all datasets via same-origin Next.js API.
  */
 export async function listDatasets(): Promise<{ success: boolean; datasets: Dataset[]; count: number }> {
-  // Skip Python backend call if using default URL (no real backend configured)
-  const usingDefaultBackend = PYTHON_BACKEND_URL === 'http://localhost:8000' && !process.env.PYTHON_BACKEND_URL;
-
-  if (usingDefaultBackend) {
-    // Go directly to Next.js API
-    try {
-      const response = await fetch('/api/vectors/list');
-      if (!response.ok) {
-        return { success: false, datasets: [], count: 0 };
-      }
-      return await response.json();
-    } catch {
-      return { success: false, datasets: [], count: 0 };
-    }
+  const response = await fetch('/api/vectors/list', NO_STORE_FETCH_OPTIONS);
+  if (!response.ok) {
+    throw new Error(`Failed to list datasets: ${response.status}`);
   }
-
-  // Try Python backend if explicitly configured
-  try {
-    const response = await fetch(`${PYTHON_BACKEND_URL}/api/v1/datasets`);
-    if (!response.ok) {
-      throw new Error(`Failed to list datasets: ${response.status}`);
-    }
-    return await response.json();
-  } catch (error: any) {
-    console.warn('Python backend unavailable, falling back to Next.js API');
-    // Fallback to Next.js API if Python backend unavailable
-    try {
-      const fallbackResponse = await fetch('/api/vectors/list');
-      return await fallbackResponse.json();
-    } catch {
-      return { success: false, datasets: [], count: 0 };
-    }
+  const payload = await response.json();
+  if (!payload?.success) {
+    throw new Error(payload?.error || 'Failed to list datasets');
   }
+  return payload;
 }
 
 /**
@@ -85,14 +85,17 @@ export async function listDatasets(): Promise<{ success: boolean; datasets: Data
  */
 export async function generateDataset(request: DatasetGenerateRequest): Promise<DatasetGenerateResponse> {
   try {
-    const response = await fetch(`${PYTHON_BACKEND_URL}/api/v1/dataset/generate`, {
+    const response = await fetch('/api/vectors/generate/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
     });
+
     if (!response.ok) {
-      throw new Error(`Failed to start generation: ${response.status}`);
+      const bodyText = await response.text().catch(() => '');
+      throw new Error(`Failed to start generation: ${response.status}${bodyText ? ` - ${bodyText}` : ''}`);
     }
+
     return await response.json();
   } catch (error: any) {
     console.error('Failed to start dataset generation:', error);
@@ -101,10 +104,33 @@ export async function generateDataset(request: DatasetGenerateRequest): Promise<
 }
 
 /**
+ * Start dataset append job
+ */
+export async function appendDataset(request: DatasetAppendRequest): Promise<DatasetAppendResponse> {
+  try {
+    const response = await fetch('/api/vectors/append/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      throw new Error(`Failed to start append: ${response.status}${bodyText ? ` - ${bodyText}` : ''}`);
+    }
+
+    return await response.json();
+  } catch (error: any) {
+    console.error('Failed to start dataset append:', error);
+    throw error;
+  }
+}
+
+/**
  * Get job status
  */
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  const response = await fetch(`${PYTHON_BACKEND_URL}/api/v1/dataset/status/${jobId}`);
+  const response = await fetch(`/api/vectors/status/${encodeURIComponent(jobId)}`, NO_STORE_FETCH_OPTIONS);
   if (!response.ok) {
     throw new Error(`Failed to get job status: ${response.status}`);
   }
@@ -119,7 +145,7 @@ export function subscribeToJobProgress(jobId: string, callbacks: {
   onComplete: (result: any) => void;
   onError: (error: string) => void;
 }): () => void {
-  const eventSource = new EventSource(`${PYTHON_BACKEND_URL}/api/v1/dataset/stream/${jobId}`);
+  const eventSource = new EventSource(`/api/vectors/stream/${encodeURIComponent(jobId)}`);
 
   eventSource.onmessage = (event) => {
     try {
@@ -163,47 +189,37 @@ export function subscribeToJobProgress(jobId: string, callbacks: {
 
 /**
  * Delete a dataset
- * Falls back to Next.js API if Python backend is not configured
+ * Uses Next.js API so OSS + Elasticsearch index cleanup stay consistent.
  */
 export async function deleteDataset(datasetName: string): Promise<{ success: boolean; dataset_name?: string; message?: string }> {
-  // Skip Python backend call if using default URL (no real backend configured)
-  const usingDefaultBackend = PYTHON_BACKEND_URL === 'http://localhost:8000' && !process.env.PYTHON_BACKEND_URL;
+  const response = await fetch('/api/vectors/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset: datasetName }),
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || `Failed to delete dataset: ${response.status}`);
+  }
+  return await response.json();
+}
 
-  if (usingDefaultBackend) {
-    // Go directly to Next.js API
-    const response = await fetch('/api/vectors/delete', {
+/**
+ * @deprecated
+ * Kept for compatibility if callers still need direct backend deletion explicitly.
+ */
+export async function deleteDatasetViaPython(datasetName: string): Promise<{ success: boolean; dataset_name?: string; message?: string }> {
+  try {
+    const response = await fetch(`/api/vectors/delete`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dataset: datasetName }),
-    });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || `Failed to delete dataset: ${response.status}`);
-    }
-    return await response.json();
-  }
-
-  // Try Python backend if explicitly configured
-  try {
-    const response = await fetch(`${PYTHON_BACKEND_URL}/api/v1/dataset/${datasetName}`, {
-      method: 'DELETE',
     });
     if (!response.ok) {
       throw new Error(`Failed to delete dataset: ${response.status}`);
     }
     return await response.json();
   } catch (error: any) {
-    console.warn('Python backend unavailable, falling back to Next.js API');
-    // Fallback to Next.js API
-    const fallbackResponse = await fetch('/api/vectors/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dataset: datasetName }),
-    });
-    if (!fallbackResponse.ok) {
-      const fallbackError = await fallbackResponse.json();
-      throw new Error(fallbackError.error || `Failed to delete dataset: ${fallbackResponse.status}`);
-    }
-    return await fallbackResponse.json();
+    throw new Error(error?.message || 'Python backend dataset deletion failed');
   }
 }

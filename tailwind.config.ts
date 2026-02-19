@@ -19,19 +19,28 @@ const config: Config = {
     extend: {
       colors: {
         primary: {
-          DEFAULT: "#3B82F6",
-          light: "#60A5FA",
-          dark: "#2563EB",
+          DEFAULT: "rgb(var(--ui-primary-rgb) / <alpha-value>)",
+          light: "rgb(var(--ui-primary-light-rgb) / <alpha-value>)",
+          dark: "rgb(var(--ui-primary-dark-rgb) / <alpha-value>)",
         },
         accent: {
-          DEFAULT: "#10B981",
-          light: "#34D399",
-          dark: "#059669",
+          DEFAULT: "rgb(var(--ui-accent-rgb) / <alpha-value>)",
+          light: "rgb(var(--ui-accent-light-rgb) / <alpha-value>)",
+          dark: "rgb(var(--ui-accent-dark-rgb) / <alpha-value>)",
         },
         dark: {
-          DEFAULT: "#0F172A",
-          light: "#1E293B",
-          lighter: "#334155",
+          DEFAULT: "rgb(var(--ui-dark-rgb) / <alpha-value>)",
+          light: "rgb(var(--ui-dark-light-rgb) / <alpha-value>)",
+          lighter: "rgb(var(--ui-dark-lighter-rgb) / <alpha-value>)",
+        },
+        gray: {
+          300: "rgb(var(--ui-gray-300-rgb) / <alpha-value>)",
+          400: "rgb(var(--ui-gray-400-rgb) / <alpha-value>)",
+          500: "rgb(var(--ui-gray-500-rgb) / <alpha-value>)",
+          600: "rgb(var(--ui-gray-600-rgb) / <alpha-value>)",
+          700: "rgb(var(--ui-gray-700-rgb) / <alpha-value>)",
+          800: "rgb(var(--ui-gray-800-rgb) / <alpha-value>)",
+          900: "rgb(var(--ui-gray-900-rgb) / <alpha-value>)",
         },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

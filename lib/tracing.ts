@@ -48,7 +48,7 @@ export function initTracing(): void {
       username: ES_USER,
       password: ES_PASS,
     },
-    indexPrefix: 'traces-lance',
+    indexPrefix: 'traces-lance-spans',
     tls: {
       rejectUnauthorized: false,
     },

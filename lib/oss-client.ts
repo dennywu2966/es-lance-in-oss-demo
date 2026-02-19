@@ -58,6 +58,17 @@ export interface VectorDataset {
   dims: number;
   size: string;
   lastModified: string;
+  shardCount?: number;
+  shardingStrategy?: 'NONE' | 'ES_ROUTING';
+  shardPath?: string;
+  datasetName?: string;
+  uriPrefix?: string;
+  // Compatibility fields for clients expecting snake_case
+  shard_count?: number;
+  sharding_strategy?: 'NONE' | 'ES_ROUTING';
+  shard_path?: string;
+  dataset_name?: string;
+  uri_prefix?: string;
 }
 
 export interface GenerateResult {
@@ -65,8 +76,32 @@ export interface GenerateResult {
   dataset?: string;
   vectors: number;
   dims: number;
+  shardCount?: number;
+  shardingStrategy?: 'NONE' | 'ES_ROUTING';
   error?: string;
   uploadTime?: number;
+}
+
+async function readDatasetMetadata(client: OSS, metaObjectKey: string): Promise<Record<string, any> | null> {
+  try {
+    const metaRes = await client.get(metaObjectKey);
+    const content = (metaRes as any)?.content;
+    let raw = '';
+
+    if (typeof content === 'string') {
+      raw = content;
+    } else if (Buffer.isBuffer(content)) {
+      raw = content.toString('utf-8');
+    } else if (content != null) {
+      raw = String(content);
+    }
+
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (error) {
+    console.warn(`Failed to read dataset metadata from ${metaObjectKey}:`, error);
+    return null;
+  }
 }
 
 // List all Lance datasets in OSS
@@ -83,11 +118,16 @@ export async function listDatasets(): Promise<VectorDataset[]> {
     // Group by dataset directory and accumulate sizes
     const datasets = new Map<string, VectorDataset>();
     const datasetSizes = new Map<string, number>();
+    const datasetMetaObjects = new Map<string, string>();
 
     for (const obj of result.objects) {
       const match = obj.name.match(/datasets\/([^/]+)\//);
       if (match) {
         const datasetName = match[1];
+
+        if (obj.name.endsWith('/dataset.meta.json')) {
+          datasetMetaObjects.set(datasetName, obj.name);
+        }
 
         // Accumulate total size
         datasetSizes.set(datasetName, (datasetSizes.get(datasetName) || 0) + obj.size);
@@ -117,6 +157,10 @@ export async function listDatasets(): Promise<VectorDataset[]> {
                 dims,
                 size: formatBytes(obj.size), // Will be updated later
                 lastModified: new Date(obj.lastModified).toISOString(),
+                shardCount: 1,
+                shardingStrategy: 'NONE',
+                shard_count: 1,
+                sharding_strategy: 'NONE',
               });
               continue;
             }
@@ -134,6 +178,10 @@ export async function listDatasets(): Promise<VectorDataset[]> {
                 dims,
                 size: formatBytes(obj.size),
                 lastModified: new Date(obj.lastModified).toISOString(),
+                shardCount: 1,
+                shardingStrategy: 'NONE',
+                shard_count: 1,
+                sharding_strategy: 'NONE',
               });
               continue;
             }
@@ -149,6 +197,10 @@ export async function listDatasets(): Promise<VectorDataset[]> {
             dims,
             size: formatBytes(obj.size), // Will be updated later
             lastModified: new Date(obj.lastModified).toISOString(),
+            shardCount: 1,
+            shardingStrategy: 'NONE',
+            shard_count: 1,
+            sharding_strategy: 'NONE',
           });
         }
       }
@@ -159,6 +211,51 @@ export async function listDatasets(): Promise<VectorDataset[]> {
       const dataset = datasets.get(datasetName);
       if (dataset) {
         dataset.size = formatBytes(totalSize);
+      }
+    }
+
+    // Enrich from metadata sidecar if available
+    for (const [datasetName, metaKey] of datasetMetaObjects) {
+      const dataset = datasets.get(datasetName);
+      if (!dataset) continue;
+
+      const metadata = await readDatasetMetadata(client, metaKey);
+      if (!metadata) continue;
+
+      const shardCountValue = Number(metadata.shard_count ?? metadata.shardCount ?? dataset.shardCount ?? 1);
+      const normalizedShardCount = Number.isFinite(shardCountValue) && shardCountValue > 0 ? Math.floor(shardCountValue) : 1;
+      const strategyRaw = String(metadata.sharding_strategy ?? metadata.shardingStrategy ?? dataset.shardingStrategy ?? 'NONE').toUpperCase();
+      const normalizedStrategy: 'NONE' | 'ES_ROUTING' = strategyRaw === 'ES_ROUTING' ? 'ES_ROUTING' : 'NONE';
+      const shardPath = metadata.shard_path ?? metadata.shardPath;
+      const datasetNameInStorage = metadata.dataset_name ?? metadata.datasetName;
+      const uriPrefixInStorage = metadata.uri_prefix ?? metadata.uriPrefix;
+      const vectorsValue = Number(metadata.vectors);
+      const dimsValue = Number(metadata.dims);
+
+      dataset.shardCount = normalizedShardCount;
+      dataset.shard_count = normalizedShardCount;
+      dataset.shardingStrategy = normalizedStrategy;
+      dataset.sharding_strategy = normalizedStrategy;
+
+      if (typeof shardPath === 'string' && shardPath.length > 0) {
+        dataset.shardPath = shardPath;
+        dataset.shard_path = shardPath;
+      }
+
+      if (typeof datasetNameInStorage === 'string' && datasetNameInStorage.length > 0) {
+        dataset.datasetName = datasetNameInStorage;
+        dataset.dataset_name = datasetNameInStorage;
+      }
+      if (typeof uriPrefixInStorage === 'string' && uriPrefixInStorage.length > 0) {
+        dataset.uriPrefix = uriPrefixInStorage;
+        dataset.uri_prefix = uriPrefixInStorage;
+      }
+
+      if (Number.isFinite(vectorsValue) && vectorsValue > 0) {
+        dataset.vectors = Math.floor(vectorsValue);
+      }
+      if (Number.isFinite(dimsValue) && dimsValue > 0) {
+        dataset.dims = Math.floor(dimsValue);
       }
     }
 
@@ -232,11 +329,19 @@ export async function jinaFetchWithRetry(
 // Generate Lance dataset and upload to OSS with GLM docs and Jina embeddings
 export async function generateAndUploadDataset(
   vectors: number,
-  dims: number
+  dims: number,
+  options?: {
+    shardCount?: number;
+    shardingStrategy?: 'NONE' | 'ES_ROUTING';
+  }
 ): Promise<GenerateResult> {
   const startTime = Date.now();
   const tempDir = `/tmp/lance-gen-${Date.now()}`;
-  const datasetName = `vectors-${vectors}-dims-${dims}-${Date.now()}`;
+  const normalizedShardCount = Math.max(1, Math.floor(options?.shardCount ?? 1));
+  const normalizedShardingStrategy: 'NONE' | 'ES_ROUTING' =
+    (options?.shardingStrategy || 'NONE') === 'ES_ROUTING' ? 'ES_ROUTING' : 'NONE';
+  const strategySlug = normalizedShardingStrategy.toLowerCase().replace('_', '-');
+  const datasetName = `vectors-${vectors}-dims-${dims}-shards-${normalizedShardCount}-${strategySlug}-${Date.now()}`;
   const localPath = `${tempDir}/${datasetName}.lance`;
 
   const GLM_API_KEY = process.env.GLM_API_KEY || '74830934db8146fb84b2c12daa182d5f.NnK1nfrYHm4Tqdgc';
@@ -382,10 +487,22 @@ export async function generateAndUploadDataset(
 
     console.log(`Generated ${embeddings.length} embeddings with ${embeddings[0].length} dimensions`);
 
-    // Step 3: Create Lance dataset with documents and embeddings
-    const pythonScript = `
+    // Step 3: Create Lance dataset with documents and embeddings.
+    // Use temp files instead of embedding large JSON directly in shell command to avoid E2BIG.
+    const records = documents.map((doc, idx) => ({
+      _id: doc.id,
+      ...doc,
+      vector: embeddings[idx],
+    }));
+    const payloadPath = `${tempDir}/documents-with-embeddings.json`;
+    const generatorScriptPath = `${tempDir}/build_lance_dataset.py`;
+    await fs.writeFile(payloadPath, JSON.stringify(records), 'utf-8');
+
+    const generatorScript = `
+import json
 import os
 import sys
+
 os.environ.pop('http_proxy', None)
 os.environ.pop('https_proxy', None)
 os.environ.pop('all_proxy', None)
@@ -395,46 +512,42 @@ import numpy as np
 import lancedb
 import pyarrow as pa
 
-output_path = "${localPath}"
+if len(sys.argv) != 3:
+    raise RuntimeError("Usage: build_lance_dataset.py <payload.json> <output_path>")
+
+payload_path = sys.argv[1]
+output_path = sys.argv[2]
 dataset_name = "data"
 
-# Document and embedding data
-documents_data = ${JSON.stringify(documents.map((doc, idx) => ({
-      _id: doc.id,
-      ...doc,
-      vector: embeddings[idx]
-    })))}
+with open(payload_path, "r", encoding="utf-8") as f:
+    documents_data = json.load(f)
 
-# Extract vectors
+if not isinstance(documents_data, list) or len(documents_data) == 0:
+    raise RuntimeError("No documents to write")
+
 vectors_array = np.array([doc['vector'] for doc in documents_data], dtype=np.float32)
-
-# Define schema with all document fields
 dims = vectors_array.shape[1]
 
-# Create FixedSizeListArray for vectors
 flat_vectors = vectors_array.flatten()
 vector_array = pa.FixedSizeListArray.from_arrays(
     pa.array(flat_vectors, type=pa.float32()),
     dims
 )
 
-# Create table
-categories = np.array([doc['topic'] for doc in documents_data])
+categories = np.array([doc.get('topic') for doc in documents_data])
 table = pa.table({
-    '_id': pa.array([doc['_id'] for doc in documents_data]),
-    'id': pa.array([doc['id'] for doc in documents_data]),
-    'title': pa.array([doc['title'] for doc in documents_data]),
-    'text': pa.array([doc['text'] for doc in documents_data]),
-    'topic': pa.array([doc['topic'] for doc in documents_data]),
+    '_id': pa.array([doc.get('_id') for doc in documents_data]),
+    'id': pa.array([doc.get('id') for doc in documents_data]),
+    'title': pa.array([doc.get('title') for doc in documents_data]),
+    'text': pa.array([doc.get('text') for doc in documents_data]),
+    'topic': pa.array([doc.get('topic') for doc in documents_data]),
     'category': pa.array(categories.tolist()),
     'vector': vector_array
 })
 
-# Connect to LanceDB and create table
 db = lancedb.connect(output_path)
 tb = db.create_table(dataset_name, table, mode="overwrite")
 
-# Create IVF-PQ index for larger datasets
 n_vectors = len(documents_data)
 if n_vectors >= 100:
     num_partitions = max(2, min(n_vectors // 10, 32))
@@ -449,8 +562,8 @@ if n_vectors >= 100:
 
 print(f"Created: {tb.count_rows()} documents with {dims}-dim vectors")
 `;
-
-    await execAsync(`python3 - <<'PYEOF'\n${pythonScript}\nPYEOF`);
+    await fs.writeFile(generatorScriptPath, generatorScript, { encoding: 'utf-8', mode: 0o700 });
+    await execAsync(`python3 ${JSON.stringify(generatorScriptPath)} ${JSON.stringify(payloadPath)} ${JSON.stringify(localPath)}`);
 
     // Upload to OSS
     const client = await getClient();
@@ -463,6 +576,21 @@ print(f"Created: {tb.count_rows()} documents with {dims}-dim vectors")
       await client.put(ossKey, file);
     }
 
+    // Persist dataset profile metadata for downstream auto-detection
+    const metadata = {
+      version: 1,
+      dataset: datasetName,
+      vectors: documents.length,
+      dims: embeddings[0].length,
+      shard_count: normalizedShardCount,
+      sharding_strategy: normalizedShardingStrategy,
+      dataset_name: 'data.lance',
+    };
+    await client.put(
+      `datasets/${datasetName}/dataset.meta.json`,
+      Buffer.from(JSON.stringify(metadata, null, 2), 'utf-8')
+    );
+
     const uploadTime = Date.now() - startTime;
 
     // Cleanup
@@ -473,6 +601,8 @@ print(f"Created: {tb.count_rows()} documents with {dims}-dim vectors")
       dataset: datasetName,
       vectors: documents.length,
       dims: embeddings[0].length,
+      shardCount: normalizedShardCount,
+      shardingStrategy: normalizedShardingStrategy,
       uploadTime,
     };
   } catch (error: any) {

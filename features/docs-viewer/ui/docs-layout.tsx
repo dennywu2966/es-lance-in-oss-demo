@@ -5,19 +5,32 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { FileTree } from './file-tree';
 import { MarkdownRenderer } from './markdown-renderer';
 import { fetchDocsTree, fetchFileContent, getDefaultFile, FileNode } from '../api/docs-api';
+import { normalizeSiteLang, readStoredSiteLang, storeSiteLang, type SiteLang } from '@/lib/site-language';
 
 export function DocsLayout() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const pathParam = searchParams.get('path');
+  const langParam = searchParams.get('lang');
 
   const [tree, setTree] = useState<FileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(pathParam);
+  const [siteLang, setSiteLang] = useState<SiteLang | null>(null);
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
+    const resolvedLang = langParam ? normalizeSiteLang(langParam) : readStoredSiteLang();
+    setSiteLang(resolvedLang);
+    storeSiteLang(resolvedLang);
+  }, [langParam]);
+
+  useEffect(() => {
+    if (!siteLang) {
+      return;
+    }
+
     async function loadTree() {
       try {
         const docsTree = await fetchDocsTree();
@@ -28,7 +41,7 @@ export function DocsLayout() {
           const defaultPath = getDefaultFile(docsTree);
           if (defaultPath) {
             setSelectedPath(defaultPath);
-            router.push(`/docs?path=${encodeURIComponent(defaultPath)}`);
+            router.push(`/docs?lang=${siteLang}&path=${encodeURIComponent(defaultPath)}`);
           }
         }
       } catch (error) {
@@ -38,7 +51,7 @@ export function DocsLayout() {
       }
     }
     loadTree();
-  }, []);
+  }, [siteLang]);
 
   useEffect(() => {
     if (selectedPath) {
@@ -57,7 +70,8 @@ export function DocsLayout() {
 
   const handleFileSelect = (path: string) => {
     setSelectedPath(path);
-    router.push(`/docs?path=${encodeURIComponent(path)}`);
+    const lang = siteLang || normalizeSiteLang(langParam);
+    router.push(`/docs?lang=${lang}&path=${encodeURIComponent(path)}`);
   };
 
   const currentFile = selectedPath ? tree.find(node => node.path === selectedPath || findInTree(node, selectedPath)) : null;
@@ -98,7 +112,7 @@ export function DocsLayout() {
               </div>
             </div>
             <a
-              href="/"
+              href={siteLang === 'zh' ? '/zh' : '/'}
               className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm text-white transition-colors"
             >
               ← Back to Demo

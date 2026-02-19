@@ -83,45 +83,106 @@ oss_prefix = f"datasets/{dataset_name}/"
 # Download dataset from OSS
 os.makedirs(temp_dir, exist_ok=True)
 
-result = bucket.list_objects(prefix=oss_prefix)
+all_object_keys = []
+marker = ''
+while True:
+    result = bucket.list_objects(prefix=oss_prefix, marker=marker, max_keys=1000)
+    for obj in result.object_list:
+        if not obj.key.endswith('/'):
+            all_object_keys.append(obj.key)
+    if not getattr(result, 'is_truncated', False):
+        break
+    marker = getattr(result, 'next_marker', '')
+    if not marker:
+        break
+
 downloaded = 0
+downloaded_rel_paths = []
+for object_key in all_object_keys:
+    relative_path = object_key.replace(oss_prefix, '')
+    local_file = os.path.join(temp_dir, relative_path)
+    os.makedirs(os.path.dirname(local_file), exist_ok=True)
+    object_data = bucket.get_object(object_key)
+    with open(local_file, 'wb') as f:
+        f.write(object_data.read())
+    downloaded += 1
+    downloaded_rel_paths.append(relative_path)
 
-for obj in result.object_list:
-    if not obj.key.endswith('/'):
-        relative_path = obj.key.replace(oss_prefix, '')
-        local_file = os.path.join(temp_dir, relative_path)
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        object_data = bucket.get_object(obj.key)
-        with open(local_file, 'wb') as f:
-            f.write(object_data.read())
-        downloaded += 1
+if downloaded == 0:
+    raise Exception(f"No dataset objects found under prefix {oss_prefix}")
 
-# Open Lance dataset using LanceDB (new API)
-db = lancedb.connect(temp_dir)
+def extract_table_names(db):
+    tables_response = db.list_tables()
+    if isinstance(tables_response, list):
+        return list(tables_response)
+    if hasattr(tables_response, 'tables'):
+        return list(tables_response.tables)
+    try:
+        return list(tables_response)
+    except Exception:
+        return []
 
-# Get table names - handle different LanceDB response formats
-tables_response = db.list_tables()
-if isinstance(tables_response, list):
-    table_names = tables_response
-elif hasattr(tables_response, 'tables'):
-    table_names = tables_response.tables
-else:
-    table_names = list(tables_response)
+dataset_roots = []
+def add_root(path):
+    if path not in dataset_roots:
+        dataset_roots.append(path)
 
-if not table_names:
-    raise Exception("No tables found in LanceDB database")
-table = db.open_table(table_names[0])
+# Always include legacy roots first.
+add_root(temp_dir)
+legacy_root = os.path.join(temp_dir, 'data.lance')
+if os.path.isdir(legacy_root):
+    add_root(legacy_root)
 
-# Get metadata
-vectors_count = table.count_rows()
-schema = table.schema
+# Discover shard roots from object names and extracted filesystem.
+discovered_shards = set()
+for rel_path in downloaded_rel_paths:
+    if rel_path.startswith('shard-'):
+        discovered_shards.add(rel_path.split('/', 1)[0])
 
-# Get vector dimensions from schema
+for shard_name in sorted(discovered_shards):
+    shard_dir = os.path.join(temp_dir, shard_name)
+    if os.path.isdir(shard_dir):
+        add_root(shard_dir)
+    shard_lance = os.path.join(shard_dir, 'data.lance')
+    if os.path.isdir(shard_lance):
+        add_root(shard_lance)
+
+for entry in sorted(os.listdir(temp_dir)):
+    if not entry.startswith('shard-'):
+        continue
+    shard_dir = os.path.join(temp_dir, entry)
+    if os.path.isdir(shard_dir):
+        add_root(shard_dir)
+    shard_lance = os.path.join(shard_dir, 'data.lance')
+    if os.path.isdir(shard_lance):
+        add_root(shard_lance)
+
+vectors_count = 0
 vector_dim = None
-for field in schema:
-    if field.name == 'vector':
-        if hasattr(field.type, 'list_size'):
-            vector_dim = field.type.list_size
+opened_tables = 0
+
+for root in dataset_roots:
+    try:
+        db = lancedb.connect(root)
+        table_names = extract_table_names(db)
+        if not table_names:
+            continue
+
+        table = db.open_table(table_names[0])
+        opened_tables += 1
+        vectors_count += int(table.count_rows())
+
+        if vector_dim is None:
+            schema = table.schema
+            for field in schema:
+                if field.name == 'vector' and hasattr(field.type, 'list_size'):
+                    vector_dim = int(field.type.list_size)
+                    break
+    except Exception:
+        continue
+
+if opened_tables == 0:
+    raise Exception("No tables found in LanceDB database")
 
 # Cleanup
 import shutil

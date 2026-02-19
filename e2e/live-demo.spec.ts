@@ -8,7 +8,7 @@ import { test, expect } from '@playwright/test';
 test.describe('Live Demo E2E Tests', () => {
   test.beforeEach(async ({ page }) => {
     // Navigate to live demo section
-    await page.goto('/');
+    await page.goto('/core-flow');
     await page.waitForLoadState('networkidle');
   });
 

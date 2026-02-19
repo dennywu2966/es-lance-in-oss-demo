@@ -9,6 +9,7 @@
 import { motion } from "framer-motion";
 import { CheckCircle2, Activity, Eye, Database, Code, FileText, RotateCw } from "lucide-react";
 import { WaterfallTimeline } from "@/shared/ui";
+import { TraceTreeViewer } from "./trace-tree-viewer";
 
 interface ResultsDisplayProps {
   searchState: any;
@@ -25,6 +26,7 @@ interface ResultsDisplayProps {
   toggleOriginalDoc: (index: number) => void;
   onTryAgain: () => void;
   getEsRequestJson: () => string;
+  traceId?: string;
 }
 
 export function ResultsDisplay({
@@ -42,7 +44,10 @@ export function ResultsDisplay({
   toggleOriginalDoc,
   onTryAgain,
   getEsRequestJson,
+  traceId,
 }: ResultsDisplayProps) {
+  const evidence = searchState?.evidence || searchState?.results?.[0]?.evidence || {};
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -72,6 +77,35 @@ export function ResultsDisplay({
           <p className="text-gray-500 text-xs">Query Latency</p>
         </div>
       </div>
+
+      {(evidence.shard_mode || evidence.prefilter_mode || evidence.refresh_state) && (
+        <div className="p-4 rounded-lg bg-primary/5 border border-primary/20">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-sm font-mono text-gray-300">运行证据 (Runtime Evidence)</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="px-2 py-1 rounded bg-white/10 text-xs font-mono text-gray-200">
+                SHARD: {evidence.shard_mode || 'UNKNOWN'}
+              </span>
+              <span className="px-2 py-1 rounded bg-white/10 text-xs font-mono text-gray-200">
+                PREFILTER: {evidence.prefilter_mode || 'none'}
+              </span>
+              <span className="px-2 py-1 rounded bg-white/10 text-xs font-mono text-gray-200">
+                REFRESH: {evidence.refresh_state || 'unknown'}
+              </span>
+              {typeof evidence.nprobes === 'number' && (
+                <span className="px-2 py-1 rounded bg-white/10 text-xs font-mono text-gray-200">
+                  NPROBES: {evidence.nprobes}
+                </span>
+              )}
+              {evidence.prefilter_reason && (
+                <span className="px-2 py-1 rounded bg-amber-500/20 text-xs font-mono text-amber-300">
+                  reason: {evidence.prefilter_reason}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Query Info */}
       {(queryVector || (isHybridMode && queryText)) && (
@@ -211,6 +245,8 @@ export function ResultsDisplay({
         </motion.div>
       )}
 
+      <TraceTreeViewer traceId={traceId} />
+
       {/* Results List */}
       <div className="space-y-3">
         {searchState.results.map((result: any, index: number) => (
@@ -223,6 +259,17 @@ export function ResultsDisplay({
                 <div>
                   <p className="text-white font-semibold font-mono">{result.id}</p>
                   <p className="text-gray-500 text-sm">{result.category}</p>
+                  <div className="mt-1 flex items-center gap-2 flex-wrap">
+                    <span className="px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-mono text-gray-300">
+                      {`shard=${result.evidence?.shard_mode || evidence.shard_mode || 'UNKNOWN'}`}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-mono text-gray-300">
+                      {`prefilter=${result.evidence?.prefilter_mode || evidence.prefilter_mode || 'none'}`}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-mono text-gray-300">
+                      {`refresh=${result.evidence?.refresh_state || evidence.refresh_state || 'unknown'}`}
+                    </span>
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-4">

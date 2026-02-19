@@ -7,6 +7,7 @@ Uses OSS credentials from ~/.oss/credentials.json (matching Next.js).
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import os
 
 from routes import dataset
 
@@ -25,9 +26,25 @@ app = FastAPI(
 )
 
 # CORS middleware for Next.js frontend
+# Supports localhost dev and remote host/IP demos.
+default_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://47.236.247.55:3000",
+]
+extra_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
+allow_origins = sorted(set(default_origins + extra_origins))
+allow_origin_regex = os.getenv(
+    "CORS_ALLOW_ORIGIN_REGEX",
+    r"https?://(localhost|127\.0\.0\.1|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|[a-zA-Z0-9.-]+)(:\d+)?$",
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=allow_origins,
+    allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +74,7 @@ async def root():
             "health": "/health",
             "datasets": "/api/v1/datasets",
             "generate": "/api/v1/dataset/generate",
+            "append": "/api/v1/dataset/append",
             "job_status": "/api/v1/dataset/status/{job_id}",
             "stream": "/api/v1/dataset/stream/{job_id}"
         }

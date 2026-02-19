@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import { UiThemeProvider } from "@/components/theme/ui-theme-provider";
+import { UiThemeSwitcher } from "@/components/theme/ui-theme-switcher";
 import "./globals.css";
 
 // Optimize font loading with display: swap to prevent FOIT
@@ -7,12 +9,21 @@ const inter = Inter({
   subsets: ["latin"],
   display: 'swap',
   preload: true,
+  fallback: [
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    "WenQuanYi Micro Hei",
+    "sans-serif",
+  ],
 });
 
 export const metadata: Metadata = {
-  title: "Lance Vector Plugin - Production-Ready Vector Search at Scale",
-  description: "High-performance kNN search with cloud storage integration. Memory-safe, tested, and scalable.",
-  keywords: ["Elasticsearch", "Vector Search", "Lance", "kNN", "OSS", "Cloud Storage"],
+  title: "Lance Vector Plugin for Elasticsearch",
+  description:
+    "Cloud-native vector search demo with shard-aware dataset generation, Elasticsearch retrieval, and regression-backed validation.",
+  keywords: ["Elasticsearch", "Vector Search", "Lance", "kNN", "Hybrid Search", "OSS"],
 };
 
 export default function RootLayout({
@@ -21,9 +32,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" data-ui-theme="aliyun">
       <body className={inter.className}>
-        {children}
+        <UiThemeProvider>
+          <UiThemeSwitcher />
+          {children}
+        </UiThemeProvider>
       </body>
     </html>
   );

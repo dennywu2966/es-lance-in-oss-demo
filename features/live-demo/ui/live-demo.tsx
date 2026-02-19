@@ -13,11 +13,17 @@
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { slideUp } from "@/shared/lib/animations";
+import {
+  ACTIVE_DATASET_CHANGED_EVENT,
+  DATASET_CATALOG_CHANGED_EVENT,
+  type ActiveDatasetChangedDetail,
+  type DatasetCatalogChangedDetail,
+} from "@/lib/dataset-events";
 import { generateEmbedding } from "@/entities/search";
 import { SearchControls } from "./search-controls";
 import { ResultsDisplay } from "./results-display";
 import { ConfirmModal } from "./confirm-modal";
-import { Database, ChevronDown, RefreshCw as RefreshIcon } from "lucide-react";
+import { Database, ChevronDown, RefreshCw as RefreshIcon, Zap, RotateCw, AlertCircle, Settings2 } from "lucide-react";
 
 interface Dataset {
   name: string;
@@ -25,6 +31,17 @@ interface Dataset {
   dims: number;
   size: string;
   lastModified: string;
+  shardCount?: number;
+  shardingStrategy?: 'NONE' | 'ES_ROUTING';
+  shardPath?: string;
+  datasetName?: string;
+  uriPrefix?: string;
+  // Compatibility fields from snake_case APIs
+  shard_count?: number;
+  sharding_strategy?: 'NONE' | 'ES_ROUTING';
+  shard_path?: string;
+  dataset_name?: string;
+  uri_prefix?: string;
 }
 
 interface SearchState {
@@ -42,6 +59,9 @@ interface SearchState {
   fusionResults?: number;
   timingBreakdown?: any[];
   esProfile?: any;
+  evidence?: any;
+  traceId?: string;
+  traceDebug?: any;
 }
 
 export function LiveDemo() {
@@ -65,11 +85,23 @@ export function LiveDemo() {
   const [queryText, setQueryText] = useState('machine learning');
   const [useExistingVector, setUseExistingVector] = useState(false);
   const [lastQueryVector, setLastQueryVector] = useState<number[] | null>(null);
+  const [nprobes, setNprobes] = useState(20);
+  const [filterEnabled, setFilterEnabled] = useState(false);
+  const [filterField, setFilterField] = useState('category');
+  const [filterValue, setFilterValue] = useState('ai');
+  const [refreshState, setRefreshState] = useState<'fresh' | 'stale' | 'unknown'>('unknown');
+
+  // NRT capability state
+  const [nrtStats, setNrtStats] = useState<Record<string, any> | null>(null);
+  const [nrtError, setNrtError] = useState<string | null>(null);
+  const [isNrtLoading, setIsNrtLoading] = useState(false);
+  const [refreshInterval, setRefreshInterval] = useState('1s');
 
   // UI state
   const [showEsRequest, setShowEsRequest] = useState(false);
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
   const [showOriginalDoc, setShowOriginalDoc] = useState<Set<number>>(new Set());
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Load datasets on mount with retry for Next.js hydration
   useEffect(() => {
@@ -84,6 +116,36 @@ export function LiveDemo() {
     }, 1000);
 
     return () => clearTimeout(retryTimer);
+  }, []);
+
+  // Refresh dataset dropdown when Vector Management generates/deletes datasets.
+  useEffect(() => {
+    const handleDatasetCatalogChanged = (event: Event) => {
+      const detail = (event as CustomEvent<DatasetCatalogChangedDetail>).detail;
+      void loadDatasetsWithRetry(detail?.datasetName);
+    };
+
+    window.addEventListener(DATASET_CATALOG_CHANGED_EVENT, handleDatasetCatalogChanged);
+    return () => {
+      window.removeEventListener(DATASET_CATALOG_CHANGED_EVENT, handleDatasetCatalogChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleActiveDatasetChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ActiveDatasetChangedDetail>).detail;
+      if (!detail?.datasetName) {
+        return;
+      }
+      setSelectedDataset(detail.datasetName);
+      setShowDatasetDropdown(false);
+      void loadDatasetsWithRetry(detail.datasetName);
+    };
+
+    window.addEventListener(ACTIVE_DATASET_CHANGED_EVENT, handleActiveDatasetChanged);
+    return () => {
+      window.removeEventListener(ACTIVE_DATASET_CHANGED_EVENT, handleActiveDatasetChanged);
+    };
   }, []);
 
   // Auto-select first dataset when datasets change
@@ -123,12 +185,19 @@ export function LiveDemo() {
         createIndex: true,
         // forceRecreate removed — backfill is idempotent now
         dims: ds.dims,
+        shardCount: ds.shardCount || ds.shard_count || 1,
+        shardingStrategy: ds.shardingStrategy || ds.sharding_strategy || 'NONE',
+        shardPath: ds.shardPath || ds.shard_path,
+        datasetName: ds.datasetName || ds.dataset_name,
+        uriPrefix: ds.uriPrefix || ds.uri_prefix,
       }),
     })
       .then(r => r.json())
       .then(data => {
         if (!data.success) {
           setError(`Failed to switch dataset: ${data.error}`);
+        } else {
+          loadNrtStats();
         }
       })
       .catch((err: any) => {
@@ -139,20 +208,153 @@ export function LiveDemo() {
       });
   }, [selectedDataset, datasets]);
 
-  const loadDatasets = async () => {
+  useEffect(() => {
+    if (!selectedDataset) {
+      setNrtStats(null);
+      setRefreshState('unknown');
+      return;
+    }
+    loadNrtStats();
+  }, [selectedDataset]);
+
+  const loadDatasets = async (preferredDatasetName?: string): Promise<boolean> => {
     setIsLoadingDatasets(true);
     try {
-      const response = await fetch('/api/vectors/list');
+      const response = await fetch('/api/vectors/list', {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        },
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.success) {
-          setDatasets(data.datasets);
+          const normalizedDatasets: Dataset[] = (data.datasets || []).map((dataset: any) => {
+            const shardCount = Number(dataset.shardCount ?? dataset.shard_count ?? 1);
+            const normalizedShardCount = Number.isFinite(shardCount) && shardCount > 0 ? Math.floor(shardCount) : 1;
+            const strategyRaw = String(dataset.shardingStrategy ?? dataset.sharding_strategy ?? 'NONE').toUpperCase();
+            const normalizedStrategy: 'NONE' | 'ES_ROUTING' = strategyRaw === 'ES_ROUTING' ? 'ES_ROUTING' : 'NONE';
+
+            return {
+              ...dataset,
+              shardCount: normalizedShardCount,
+              shard_count: normalizedShardCount,
+              shardingStrategy: normalizedStrategy,
+              sharding_strategy: normalizedStrategy,
+            };
+          });
+          setDatasets(normalizedDatasets);
+          const preferredExists = !!preferredDatasetName && normalizedDatasets.some((dataset) => dataset.name === preferredDatasetName);
+          if (preferredDatasetName && normalizedDatasets.some((dataset) => dataset.name === preferredDatasetName)) {
+            setSelectedDataset(preferredDatasetName);
+          }
+          return preferredExists;
         }
       }
+      return false;
     } catch (err) {
       console.error('Failed to load datasets:', err);
+      return false;
     } finally {
       setIsLoadingDatasets(false);
+    }
+  };
+
+  const loadDatasetsWithRetry = async (preferredDatasetName?: string) => {
+    const targetName = preferredDatasetName?.trim();
+    const maxAttempts = targetName ? 6 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const found = await loadDatasets(targetName);
+      if (!targetName || found) {
+        return;
+      }
+      await sleep(1200);
+    }
+  };
+
+  const buildFilterPayload = () => {
+    if (!filterEnabled || !filterValue.trim()) {
+      return undefined;
+    }
+    return {
+      term: {
+        [filterField]: filterValue.trim(),
+      },
+    };
+  };
+
+  const loadNrtStats = async () => {
+    if (!selectedDataset) return;
+    setIsNrtLoading(true);
+    setNrtError(null);
+    try {
+      const response = await fetch(`/api/lance/stats?dataset=${encodeURIComponent(selectedDataset)}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to load NRT stats');
+      }
+      setNrtStats(data);
+      setRefreshState((data.refresh_state || 'unknown') as 'fresh' | 'stale' | 'unknown');
+      if (data.refresh_interval) {
+        setRefreshInterval(data.refresh_interval);
+      }
+    } catch (err: any) {
+      setNrtError(err.message || 'NRT stats unavailable');
+    } finally {
+      setIsNrtLoading(false);
+    }
+  };
+
+  const triggerManualRefresh = async () => {
+    if (!selectedDataset) return;
+    setIsNrtLoading(true);
+    setNrtError(null);
+    try {
+      const response = await fetch('/api/lance/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataset: selectedDataset }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Manual refresh failed');
+      }
+      setRefreshState('fresh');
+      await loadNrtStats();
+    } catch (err: any) {
+      setNrtError(err.message || 'Manual refresh failed');
+    } finally {
+      setIsNrtLoading(false);
+    }
+  };
+
+  const updateRefreshConfig = async () => {
+    if (!selectedDataset) return;
+    setIsNrtLoading(true);
+    setNrtError(null);
+    try {
+      const response = await fetch('/api/lance/refresh-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset: selectedDataset,
+          refresh_interval: refreshInterval,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update refresh interval');
+      }
+      if (data.refresh_interval) {
+        setRefreshInterval(data.refresh_interval);
+      }
+      await loadNrtStats();
+    } catch (err: any) {
+      setNrtError(err.message || 'Failed to update refresh config');
+    } finally {
+      setIsNrtLoading(false);
     }
   };
 
@@ -166,6 +368,10 @@ export function LiveDemo() {
     const startTime = Date.now();
 
     try {
+      const selectedProfile = datasets.find((d) => d.name === selectedDataset);
+      const effectiveShardingStrategy = selectedProfile?.shardingStrategy || selectedProfile?.sharding_strategy;
+      const filterPayload = buildFilterPayload();
+
       let queryVector = lastQueryVector;
 
       // Generate new vector if needed
@@ -189,8 +395,7 @@ export function LiveDemo() {
         // - BM25 text search with timing
         // - Lance kNN vector search with timing
         // - RRF fusion with timing
-        // Note: esIndex defaults to 'lance-validation-test' on the server side;
-        // all datasets share this single ES index so we don't override it here.
+        // Server resolves per-dataset index automatically when dataset is provided.
         const hybridResponse = await fetch('/api/search/hybrid', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -199,6 +404,13 @@ export function LiveDemo() {
             k: topK,
             numCandidates: topK * 2,
             dataset: selectedDataset,
+            filter: filterPayload,
+            nprobes,
+            refreshState,
+            shardingStrategy: effectiveShardingStrategy,
+            datasetProfile: {
+              shardingStrategy: effectiveShardingStrategy,
+            },
           }),
         });
 
@@ -250,6 +462,9 @@ export function LiveDemo() {
           timingBreakdown: hybridData.timingBreakdown || [],
           timing: convertedTiming,
           esProfile: hybridData.esProfile,
+          evidence: hybridData.evidence,
+          traceId: hybridData.traceId,
+          traceDebug: hybridData.traceDebug,
         };
       } else {
         const response = await fetch('/api/search', {
@@ -261,6 +476,13 @@ export function LiveDemo() {
             numCandidates: topK * 2,
             profile: enableProfiling,
             dataset: selectedDataset,
+            filter: filterPayload,
+            nprobes,
+            refreshState,
+            shardingStrategy: effectiveShardingStrategy,
+            datasetProfile: {
+              shardingStrategy: effectiveShardingStrategy,
+            },
           }),
         });
 
@@ -276,8 +498,12 @@ export function LiveDemo() {
           totalHits: data.totalHits || 0,
           queryDimension: data.queryDimension || queryVector.length,
           queryVector,
+          datasetName: data.datasetName || selectedDataset || undefined,
           vectorsCount: data.vectorsCount || 0,
           timing: data.timing,
+          evidence: data.evidence,
+          traceId: data.traceId,
+          traceDebug: data.traceDebug,
         };
       }
 
@@ -316,23 +542,43 @@ export function LiveDemo() {
   const getEsRequestJson = () => {
     if (!searchState || !searchState.queryVector) return '';
 
+    const filterPayload = buildFilterPayload();
+    const vectorQuery = {
+      lance_knn: {
+        field: "embedding",
+        query_vector: searchState.queryVector,
+        k: topK,
+        num_candidates: topK * 2,
+        nprobes,
+      }
+    };
+
+    const wrappedVectorQuery = filterPayload
+      ? {
+          bool: {
+            must: [vectorQuery],
+            filter: [filterPayload],
+          },
+        }
+      : vectorQuery;
+
     if (isHybridMode && searchState.queryText) {
       const textBody = {
-        query: { match: { text: searchState.queryText } },
+        query: filterPayload
+          ? {
+              bool: {
+                must: [{ match: { text: searchState.queryText } }],
+                filter: [filterPayload],
+              },
+            }
+          : { match: { text: searchState.queryText } },
         size: topK * 2,
         _source: ["id", "category", "text"],
       };
 
       const vectorBody = {
         profile: enableProfiling,
-        query: {
-          lance_knn: {
-            field: "embedding",
-            query_vector: searchState.queryVector,
-            k: topK,
-            num_candidates: topK * 2,
-          }
-        },
+        query: wrappedVectorQuery,
         size: topK,
         _source: ["id", "category", "text"],
       };
@@ -342,14 +588,7 @@ export function LiveDemo() {
 
     const queryBody = {
       profile: enableProfiling,
-      query: {
-        lance_knn: {
-          field: "embedding",
-          query_vector: searchState.queryVector,
-          k: topK,
-          num_candidates: topK * 2,
-        }
-      },
+      query: wrappedVectorQuery,
       size: topK,
       _source: ["category", "text"],
     };
@@ -400,7 +639,13 @@ export function LiveDemo() {
                   <p className="text-white text-sm font-semibold">Search Dataset</p>
                   <p className="text-gray-400 text-xs">
                     {selectedDataset
-                      ? `${selectedDataset} (${datasets.find(d => d.name === selectedDataset)?.vectors || 0} vectors)`
+                      ? (() => {
+                          const active = datasets.find(d => d.name === selectedDataset);
+                          const vectors = active?.vectors || 0;
+                          const shards = active?.shardCount || active?.shard_count || 1;
+                          const strategy = active?.shardingStrategy || active?.sharding_strategy || 'NONE';
+                          return `${selectedDataset} (${vectors} vectors • shards=${shards} • ${strategy})`;
+                        })()
                       : 'No dataset selected'}
                   </p>
                 </div>
@@ -440,7 +685,7 @@ export function LiveDemo() {
                           >
                             <div className="text-white text-sm font-mono truncate">{dataset.name}</div>
                             <div className="text-gray-400 text-xs">
-                              {dataset.vectors} vectors • {dataset.dims} dims
+                              {dataset.vectors} vectors • {dataset.dims} dims • shards={dataset.shardCount || dataset.shard_count || 1} • {dataset.shardingStrategy || dataset.sharding_strategy || 'NONE'}
                             </div>
                           </button>
                         ))}
@@ -468,6 +713,84 @@ export function LiveDemo() {
           whileInView="visible"
           viewport={{ once: true }}
           variants={slideUp}
+          className="max-w-4xl mx-auto mb-6"
+        >
+          <div className="glass-card p-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="text-white text-sm font-semibold flex items-center gap-2">
+                  <Settings2 className="w-4 h-4 text-primary" />
+                  近实时控制 (NRT)
+                </p>
+                <p className="text-gray-400 text-xs">
+                  stats / manual refresh / refresh interval
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={loadNrtStats}
+                  disabled={!selectedDataset || isNrtLoading}
+                  className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-mono text-white disabled:opacity-50"
+                >
+                  {isNrtLoading ? 'Loading...' : 'Load Stats'}
+                </button>
+                <button
+                  onClick={triggerManualRefresh}
+                  disabled={!selectedDataset || isNrtLoading}
+                  className="px-3 py-1.5 rounded bg-primary/20 hover:bg-primary/30 border border-primary/30 text-xs font-mono text-primary-light disabled:opacity-50"
+                >
+                  Manual Refresh
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 grid md:grid-cols-4 gap-2">
+              <div className="rounded border border-gray-700/80 bg-black/40 px-3 py-2">
+                <p className="text-[10px] font-mono text-gray-500">REFRESH STATE</p>
+                <p className="text-xs font-mono text-white mt-1">{refreshState}</p>
+              </div>
+              <div className="rounded border border-gray-700/80 bg-black/40 px-3 py-2">
+                <p className="text-[10px] font-mono text-gray-500">DOCS</p>
+                <p className="text-xs font-mono text-white mt-1">{nrtStats?.docs_count ?? '-'}</p>
+              </div>
+              <div className="rounded border border-gray-700/80 bg-black/40 px-3 py-2">
+                <p className="text-[10px] font-mono text-gray-500">SHARDS</p>
+                <p className="text-xs font-mono text-white mt-1">{nrtStats?.shard_count ?? '-'}</p>
+              </div>
+              <div className="rounded border border-gray-700/80 bg-black/40 px-3 py-2">
+                <p className="text-[10px] font-mono text-gray-500">REFRESH TOTAL</p>
+                <p className="text-xs font-mono text-white mt-1">{nrtStats?.refresh_total ?? '-'}</p>
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <label className="text-xs font-mono text-gray-400">refresh_interval</label>
+              <input
+                value={refreshInterval}
+                onChange={(e) => setRefreshInterval(e.target.value)}
+                disabled={!selectedDataset || isNrtLoading}
+                className="w-28 bg-black/50 border border-gray-600 rounded px-2 py-1.5 text-white font-mono text-xs focus:outline-none focus:border-primary disabled:opacity-50"
+              />
+              <button
+                onClick={updateRefreshConfig}
+                disabled={!selectedDataset || isNrtLoading}
+                className="px-3 py-1.5 rounded bg-accent/20 hover:bg-accent/30 border border-accent/30 text-xs font-mono text-accent-light disabled:opacity-50"
+              >
+                Save Config
+              </button>
+            </div>
+
+            {nrtError && (
+              <p className="text-red-300 text-xs mt-2">{nrtError}</p>
+            )}
+          </div>
+        </motion.div>
+
+        <motion.div
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true }}
+          variants={slideUp}
           className="max-w-4xl mx-auto relative z-10"
         >
           <div className="glass-card p-8">
@@ -485,6 +808,14 @@ export function LiveDemo() {
               hasLastVector={lastQueryVector !== null}
               isLoading={isLoading || isBackfilling}
               onSearchClick={() => setShowConfirm(true)}
+              nprobes={nprobes}
+              setNprobes={setNprobes}
+              filterEnabled={filterEnabled}
+              setFilterEnabled={setFilterEnabled}
+              filterField={filterField}
+              setFilterField={setFilterField}
+              filterValue={filterValue}
+              setFilterValue={setFilterValue}
             />
 
             {isLoading && (
@@ -532,6 +863,7 @@ export function LiveDemo() {
                 toggleOriginalDoc={toggleOriginalDoc}
                 onTryAgain={() => setShowConfirm(true)}
                 getEsRequestJson={getEsRequestJson}
+                traceId={searchState.traceId}
               />
             )}
           </div>
@@ -556,6 +888,3 @@ export function LiveDemo() {
     </section>
   );
 }
-
-// Icons
-import { Zap, RotateCw, AlertCircle } from "lucide-react";

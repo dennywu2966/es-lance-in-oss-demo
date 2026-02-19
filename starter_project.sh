@@ -9,7 +9,7 @@
 #
 # Requirements:
 # - OSS credentials in ~/.oss/credentials.json
-# - ES distribution in ../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
+# - ES distribution in /home/denny/projects/es-9.2.4-plugins-rt-scale/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT
 # - Node.js and npm installed
 ##############################################################################
 
@@ -28,7 +28,8 @@ NC='\033[0m' # No Color
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ES_DIST_DIR="../es-9.2.4-plugins/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT"
+ES_DIST_DIR_DEFAULT="/home/denny/projects/es-9.2.4-plugins-rt-scale/build/distribution/local/elasticsearch-9.2.4-SNAPSHOT"
+ES_DIST_DIR="${ES_DIST_DIR:-$ES_DIST_DIR_DEFAULT}"
 NEXTJS_DIR="$SCRIPT_DIR"
 
 # Ports
@@ -37,7 +38,7 @@ NEXTJS_PORT=3000
 PYTHON_PORT=8000
 
 # ES Configuration
-ES_PASSWORD="8jP4o9dzi=b+cRvBHiuw"
+ES_PASSWORD="Summer11"
 ES_USER="elastic"
 ES_HOST="127.0.0.1"
 
@@ -263,9 +264,10 @@ start_nextjs() {
 
     cd "$NEXTJS_DIR"
 
-    # Start Next.js in background
-    nohup npm run dev > "$NEXTJS_LOG_FILE" 2>&1 &
-    NEXTJS_PID=$!
+    # Start Next.js as a detached session so it survives shell/session termination.
+    # Dev ES uses a self-signed cert on https://127.0.0.1:9200.
+    NODE_TLS_REJECT_UNAUTHORIZED=0 setsid -f nohup npm run dev > "$NEXTJS_LOG_FILE" 2>&1 < /dev/null
+    NEXTJS_PID=$(pgrep -f "next dev" | head -n 1 || true)
 
     log_info "Waiting for Next.js to be ready..."
 
@@ -313,9 +315,9 @@ start_python_backend() {
 
     cd "$SCRIPT_DIR/backend"
 
-    # Start Python backend in background
-    nohup python3 main.py > /tmp/es-lance-demo-python.log 2>&1 &
-    PYTHON_PID=$!
+    # Start Python backend as a detached session so it survives shell/session termination
+    setsid -f nohup python3 main.py > /tmp/es-lance-demo-python.log 2>&1 < /dev/null
+    PYTHON_PID=$(pgrep -f "python3 main.py" | head -n 1 || true)
 
     log_info "Waiting for Python backend to be ready..."
 

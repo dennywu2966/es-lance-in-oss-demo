@@ -1,19 +1,28 @@
 import { NextResponse } from "next/server";
 import { listDatasets } from "@/lib/oss-client";
 
-// Cache for 60 seconds - datasets list doesn't change frequently
-export const revalidate = 60;
 export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
 
 export async function GET() {
   try {
     const datasets = await listDatasets();
 
-    return NextResponse.json({
-      success: true,
-      datasets,
-      count: datasets.length,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        datasets,
+        count: datasets.length,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          Pragma: "no-cache",
+          Expires: "0",
+        },
+      }
+    );
   } catch (error: any) {
     return NextResponse.json(
       {
@@ -21,7 +30,14 @@ export async function GET() {
         error: error.message,
         datasets: [],
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          Pragma: "no-cache",
+          Expires: "0",
+        },
+      }
     );
   }
 }

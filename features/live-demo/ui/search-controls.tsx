@@ -6,7 +6,7 @@
 
 "use client";
 
-import { Search, Sparkles, Code, Zap, RotateCw } from "lucide-react";
+import { Search, Sparkles, RotateCw, SlidersHorizontal, Filter } from "lucide-react";
 
 interface SearchControlsProps {
   isHybridMode: boolean;
@@ -22,6 +22,14 @@ interface SearchControlsProps {
   hasLastVector: boolean;
   isLoading: boolean;
   onSearchClick: () => void;
+  nprobes: number;
+  setNprobes: (value: number) => void;
+  filterEnabled: boolean;
+  setFilterEnabled: (value: boolean) => void;
+  filterField: string;
+  setFilterField: (value: string) => void;
+  filterValue: string;
+  setFilterValue: (value: string) => void;
 }
 
 export function SearchControls({
@@ -38,10 +46,17 @@ export function SearchControls({
   hasLastVector,
   isLoading,
   onSearchClick,
+  nprobes,
+  setNprobes,
+  filterEnabled,
+  setFilterEnabled,
+  filterField,
+  setFilterField,
+  filterValue,
+  setFilterValue,
 }: SearchControlsProps) {
   return (
     <>
-      {/* Search Mode Toggle */}
       <div className="mb-6 flex items-center justify-center gap-4 flex-wrap">
         <button
           onClick={() => setIsHybridMode(false)}
@@ -69,27 +84,43 @@ export function SearchControls({
         </button>
       </div>
 
-      {/* Parameters */}
       <div className="mb-6 space-y-4">
-        {/* Top-K */}
-        <div className="flex items-center justify-center gap-6">
-          <div className="flex items-center gap-3">
+        <div className="grid md:grid-cols-2 gap-3">
+          <div className="flex items-center gap-3 justify-center md:justify-start">
             <label className="text-sm font-mono text-gray-300">Top-K Results:</label>
             <input
               type="number"
               min={1}
               max={50}
               value={topK}
-              onChange={(e) => setTopK(Math.min(50, Math.max(1, parseInt(e.target.value) || 5)))}
+              onChange={(e) => {
+                const parsed = Number.parseInt(e.target.value, 10);
+                const normalized = Number.isFinite(parsed) ? parsed : 5;
+                setTopK(Math.min(50, Math.max(1, normalized)));
+              }}
               disabled={isLoading}
               className="w-20 bg-black/50 border border-gray-600 rounded px-3 py-2 text-white font-mono text-center focus:outline-none focus:border-primary disabled:opacity-50"
             />
           </div>
+          <div className="flex items-center gap-3 justify-center md:justify-end">
+            <label className="text-sm font-mono text-gray-300 flex items-center gap-2">
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              NPROBES:
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={128}
+              value={nprobes}
+              onChange={(e) => setNprobes(Math.min(128, Math.max(1, parseInt(e.target.value) || 20)))}
+              disabled={isLoading}
+              className="w-24 bg-black/50 border border-gray-600 rounded px-3 py-2 text-white font-mono text-center focus:outline-none focus:border-primary disabled:opacity-50"
+            />
+          </div>
         </div>
 
-        {/* Vector Selection (kNN only) */}
         {!isHybridMode && (
-          <div className="flex items-center justify-center gap-4">
+          <div className="flex items-center justify-center gap-4 flex-wrap">
             <span className="text-sm font-mono text-gray-300">Query Vector:</span>
             <button
               onClick={() => setUseExistingVector(false)}
@@ -119,7 +150,6 @@ export function SearchControls({
           </div>
         )}
 
-        {/* Query Text (Hybrid only) */}
         {isHybridMode && (
           <div className="flex items-center justify-center gap-4">
             <label className="text-sm font-mono text-gray-300">Query Text:</label>
@@ -134,7 +164,53 @@ export function SearchControls({
           </div>
         )}
 
-        {/* Profiling Toggle */}
+        <div className="rounded-lg border border-gray-700/80 bg-black/30 p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={filterEnabled}
+                onChange={(e) => setFilterEnabled(e.target.checked)}
+                disabled={isLoading}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+              <span className="ml-3 text-sm font-mono text-gray-200 flex items-center gap-2">
+                <Filter className="w-3.5 h-3.5" />
+                预过滤 (Prefilter)
+              </span>
+            </label>
+            <span className="text-xs text-gray-500 font-mono">Pushdown first, fallback when unsupported</span>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs text-gray-400 font-mono">Filter Field</label>
+              <select
+                value={filterField}
+                onChange={(e) => setFilterField(e.target.value)}
+                disabled={isLoading || !filterEnabled}
+                className="w-full bg-black/50 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-primary disabled:opacity-50"
+              >
+                <option value="category">category</option>
+                <option value="topic">topic</option>
+                <option value="id">id</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-gray-400 font-mono">Filter Value</label>
+              <input
+                type="text"
+                value={filterValue}
+                onChange={(e) => setFilterValue(e.target.value)}
+                disabled={isLoading || !filterEnabled}
+                placeholder="e.g. ai"
+                className="w-full bg-black/50 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-primary disabled:opacity-50"
+              />
+            </div>
+          </div>
+        </div>
+
         <div className="flex items-center justify-center gap-3">
           <label className="relative inline-flex items-center cursor-pointer">
             <input
@@ -151,7 +227,6 @@ export function SearchControls({
         </div>
       </div>
 
-      {/* Search Button */}
       <div className="flex justify-center mb-8">
         <button
           onClick={onSearchClick}

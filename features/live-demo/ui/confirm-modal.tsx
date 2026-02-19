@@ -46,7 +46,7 @@ export function ConfirmModal({
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ duration: 0.2 }}
-        className="bg-gray-900 border border-gray-700 rounded-lg p-8 max-w-md w-full"
+        className="modal-panel rounded-lg p-8 max-w-md w-full"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-2xl font-bold text-white mb-4">
@@ -57,7 +57,7 @@ export function ConfirmModal({
           {enableProfiling ? ' with profiling' : ''} against live Lance dataset
           {useExistingVector && hasLastVector ? ' using current query vector' : ''}?
         </p>
-        <div className="bg-black/30 rounded-lg p-4 mb-6 font-mono text-sm space-y-1">
+        <div className="rounded-lg border border-gray-600/40 bg-black/20 p-4 mb-6 font-mono text-sm space-y-1">
           <p className="text-gray-400">• Dataset: <span className="text-white">{datasetName || "Latest available"}</span></p>
           <p className="text-gray-400">• Dataset size: <span className="text-white">{vectorsCount || "N/A"} vectors, {queryDimension || "N/A"} dims</span></p>
 

@@ -3,6 +3,7 @@ import { getClient } from "@/lib/oss-client";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { datasetIndexName, resolveDatasetProfile, type ShardingStrategy } from "@/lib/dataset-profile";
 import { ES_HOST as CONFIG_ES_HOST, ES_AUTH as CONFIG_ES_AUTH, ES_SECURITY_ENABLED } from "@/entities/search/model/config";
 
 const execAsync = promisify(exec);
@@ -13,6 +14,12 @@ interface BackfillRequest {
   createIndex?: boolean;
   forceRecreate?: boolean;  // Delete index before creating (needed when switching datasets)
   dims?: number;            // Vector dimensions for lance_vector field (default 768)
+  shardCount?: number;
+  shardingStrategy?: 'NONE' | 'ES_ROUTING' | string;
+  shardPath?: string;
+  datasetName?: string;
+  uriPrefix?: string;
+  fieldMapping?: string;
 }
 
 interface DocumentMetadata {
@@ -24,8 +31,28 @@ interface DocumentMetadata {
   category: string;
 }
 
+interface LanceEmbeddingStorageConfig {
+  uri?: string;
+  uri_prefix?: string;
+  shard_path?: string;
+  dataset_name?: string;
+}
+
+
 // Create Elasticsearch index with proper mapping for metadata + lance_vector field
-async function createESIndex(esIndex: string, datasetUri?: string, dims: number = 768): Promise<void> {
+async function createESIndex(
+  esIndex: string,
+  datasetUri: string | undefined,
+  dims: number,
+  options: {
+    shardCount: number;
+    shardingStrategy: ShardingStrategy;
+    shardPath?: string;
+    datasetName?: string;
+    uriPrefix?: string;
+    fieldMapping?: string;
+  }
+): Promise<void> {
   const ES_HOST = process.env.ES_HOST || CONFIG_ES_HOST;
 
   // Ignore self-signed certificates for local ES
@@ -54,20 +81,39 @@ async function createESIndex(esIndex: string, datasetUri?: string, dims: number 
 
   // Add lance_vector field if dataset URI is provided
   if (datasetUri) {
+    const storage: Record<string, any> = {
+      type: "external",
+      lance_id_column: "_id",
+      lance_vector_column: "vector",
+      read_only: true,
+      sharding_strategy: options.shardingStrategy,
+    };
+
+    if (options.fieldMapping) {
+      storage.field_mapping = options.fieldMapping;
+    }
+
+    // Shard-aware path is optional; default to legacy URI mode for compatibility
+    if (options.uriPrefix) {
+      storage.uri_prefix = options.uriPrefix;
+      storage.shard_path = options.shardPath || `${esIndex}/shard-{shard_id}`;
+      storage.dataset_name = options.datasetName || "data.lance";
+    } else {
+      storage.uri = datasetUri;
+    }
+
     properties.embedding = {
       type: "lance_vector",
       dims,
-      storage: {
-        type: "external",
-        uri: datasetUri,
-        lance_id_column: "_id",
-        lance_vector_column: "vector",
-        read_only: true
-      }
+      storage,
     };
   }
 
   const mapping = {
+    settings: {
+      number_of_shards: Math.max(1, Math.floor(options.shardCount)),
+      number_of_replicas: 0,
+    },
     mappings: {
       properties
     }
@@ -237,6 +283,24 @@ async function countDatasetDocuments(esIndex: string, dataset: string): Promise<
   }
 }
 
+// Read the current lance_vector.storage mapping for compatibility checks.
+async function getEmbeddingStorageConfig(esIndex: string): Promise<LanceEmbeddingStorageConfig | undefined> {
+  const ES_HOST = process.env.ES_HOST || CONFIG_ES_HOST;
+  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  try {
+    const headers: Record<string, string> = {};
+    if (ES_SECURITY_ENABLED) headers['Authorization'] = `Basic ${CONFIG_ES_AUTH}`;
+    const response = await fetch(`${ES_HOST}/${esIndex}/_mapping`, { method: 'GET', headers });
+    if (!response.ok) return undefined;
+    const mapping = await response.json();
+    const first = Object.values(mapping || {})[0] as any;
+    return first?.mappings?.properties?.embedding?.storage;
+  } finally {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = originalRejectUnauthorized;
+  }
+}
+
 // Remove only this dataset's documents (preserves other datasets in the same index)
 async function deleteDatasetDocuments(esIndex: string, dataset: string): Promise<void> {
   const ES_HOST = process.env.ES_HOST || CONFIG_ES_HOST;
@@ -314,10 +378,22 @@ async function indexDocuments(esIndex: string, documents: DocumentMetadata[], da
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
+  let tempDir = '';
 
   try {
     const body = await request.json() as BackfillRequest;
-    const { dataset, createIndex = true, forceRecreate = false, dims = 768 } = body;
+    const {
+      dataset,
+      createIndex = true,
+      forceRecreate = false,
+      dims = 768,
+      shardCount = 1,
+      shardingStrategy,
+      shardPath,
+      datasetName,
+      uriPrefix,
+      fieldMapping,
+    } = body;
 
     if (!dataset) {
       return NextResponse.json({
@@ -326,52 +402,157 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // Per-dataset index: lance-ds-{sanitizedName} (each has its own immutable lance_uri)
-    const sanitizedDatasetName = dataset.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const perDatasetIndex = `lance-ds-${sanitizedDatasetName}`;
-    const tempDir = `/tmp/lance-backfill-${Date.now()}`;
+    const requestProfile = {
+      dims,
+      shardCount,
+      shardingStrategy,
+      shardPath,
+      datasetName,
+      uriPrefix,
+      fieldMapping,
+    };
+
+    const perDatasetIndex = datasetIndexName(dataset);
     const datasetPath = `datasets/${dataset}`;
+    const datasetPrefix = `${datasetPath}/`;
 
-    // --- Alias-based fast switch ---
-    // If per-dataset index already exists and not forcing recreate, just update alias (O(1))
-    const alreadyIndexed = await indexExists(perDatasetIndex);
-    if (alreadyIndexed && !forceRecreate) {
-      // Dataset already has a dedicated index — just switch alias pointer
-      await updateAlias(perDatasetIndex);
-      return NextResponse.json({
-        success: true,
-        esIndex: perDatasetIndex,
-        alias: LANCE_ALIAS,
-        totalDocuments: 0,
-        indexedDocuments: 0,
-        duration: `${Date.now() - startTime}ms`,
-        message: `Switched to dataset "${dataset}" via alias (O(1)). Index "${perDatasetIndex}" already exists.`,
-        skipped: true,
-        aliasUpdated: true,
-      });
-    }
-
-    // If forceRecreate, delete the per-dataset index to rebuild
-    if (alreadyIndexed && forceRecreate) {
-      await deleteESIndex(perDatasetIndex);
-    }
-
-    // Create temp directory
-    await fs.mkdir(tempDir, { recursive: true });
-
-    // Download dataset from OSS
+    // Download dataset listing from OSS and read profile metadata if available
     const client = await getClient();
     const result = await client.list({
-      prefix: datasetPath,
+      prefix: datasetPrefix,
     });
 
     if (!result.objects || result.objects.length === 0) {
-      await fs.rm(tempDir, { recursive: true, force: true });
       return NextResponse.json({
         success: false,
         error: `Dataset "${dataset}" not found in OSS. Please generate a dataset first.`,
       });
     }
+
+    const objectNames = (result.objects || [])
+      .map((obj: any) => (typeof obj?.name === 'string' ? obj.name : ''))
+      .filter((name: string) => name.length > 0);
+
+    const hasLegacyNestedShardLayout = objectNames.some((name) =>
+      name.startsWith(datasetPrefix) && /\/shard-\d+\/data\.lance\/data\.lance\//.test(name)
+    );
+    const hasLegacyNestedSingleLayout = objectNames.some((name) =>
+      name.startsWith(`${datasetPrefix}data.lance/data.lance/`)
+    );
+    const discoveredShardIds = Array.from(
+      new Set(
+        objectNames
+          .map((name) => {
+            const match = name.match(/\/shard-(\d+)\//);
+            if (!match) return null;
+            const parsed = Number.parseInt(match[1], 10);
+            return Number.isFinite(parsed) ? parsed : null;
+          })
+          .filter((value): value is number => value !== null)
+      )
+    ).sort((a, b) => a - b);
+    const hasShardObjects = discoveredShardIds.length > 0;
+    const discoveredShardCount = discoveredShardIds.length > 0 ? (Math.max(...discoveredShardIds) + 1) : 1;
+
+    const metadataKey = `${datasetPrefix}dataset.meta.json`;
+    const hasMetadata = result.objects.some((obj: { name?: string }) => Boolean(obj?.name) && obj.name === metadataKey);
+    let datasetMetadata: Record<string, unknown> | undefined;
+
+    if (hasMetadata) {
+      try {
+        const metaObject = await client.get(metadataKey);
+        const content = (metaObject as any)?.content;
+        let raw = '';
+        if (typeof content === 'string') {
+          raw = content;
+        } else if (Buffer.isBuffer(content)) {
+          raw = content.toString('utf-8');
+        } else if (content != null) {
+          raw = String(content);
+        }
+        if (raw) {
+          datasetMetadata = JSON.parse(raw);
+        }
+      } catch (metadataError: any) {
+        console.warn(`Failed to read metadata for dataset "${dataset}":`, metadataError?.message || metadataError);
+      }
+    }
+
+    const effectiveProfile = resolveDatasetProfile({
+      request: requestProfile,
+      metadata: datasetMetadata,
+      defaults: {
+        dims: 768,
+        shardCount: 1,
+        shardingStrategy: 'NONE',
+      },
+    });
+    const effectiveShardCount = Math.max(effectiveProfile.shardCount, discoveredShardCount);
+    const storageDatasetName =
+      hasLegacyNestedShardLayout &&
+      (effectiveProfile.datasetName || "data.lance") === "data.lance"
+        ? "data.lance/data.lance"
+        : effectiveProfile.datasetName;
+    const shouldUseShardAwareStorage = Boolean(effectiveProfile.uriPrefix) || hasShardObjects;
+    const resolvedUriPrefix = shouldUseShardAwareStorage
+      ? (effectiveProfile.uriPrefix || `oss://denny-test-lance/${datasetPath}`)
+      : undefined;
+    const resolvedShardPath = effectiveProfile.shardPath || "shard-{shard_id}";
+
+    const metadataVectorsRaw = Number((datasetMetadata as any)?.vectors ?? 0);
+    const metadataVectors = Number.isFinite(metadataVectorsRaw) && metadataVectorsRaw > 0
+      ? Math.floor(metadataVectorsRaw)
+      : 0;
+    const vectorsFromNameMatch = /vectors-(\d+)-dims-/i.exec(dataset);
+    const vectorsFromName = vectorsFromNameMatch ? Number.parseInt(vectorsFromNameMatch[1], 10) : 0;
+    const expectedVectorsHint = metadataVectors > 0 ? metadataVectors : (Number.isFinite(vectorsFromName) ? vectorsFromName : 0);
+
+    const alreadyIndexed = await indexExists(perDatasetIndex);
+    if (alreadyIndexed && !forceRecreate) {
+      // Idempotent fast-path: if per-dataset index already has all expected docs,
+      // just ensure alias points to it instead of deleting/rebuilding.
+      await ensureDatasetField(perDatasetIndex);
+      const existingDatasetDocs = await countDatasetDocuments(perDatasetIndex, dataset);
+      const existingStorage = await getEmbeddingStorageConfig(perDatasetIndex);
+      const storageModeMatches = shouldUseShardAwareStorage
+        ? (
+            Boolean(existingStorage?.uri_prefix) &&
+            (!resolvedUriPrefix || existingStorage?.uri_prefix === resolvedUriPrefix) &&
+            (!resolvedShardPath || existingStorage?.shard_path === resolvedShardPath) &&
+            (!storageDatasetName || (existingStorage?.dataset_name || "data.lance") === storageDatasetName)
+          )
+        : Boolean(existingStorage?.uri);
+      if (expectedVectorsHint > 0 && existingDatasetDocs >= expectedVectorsHint) {
+        if (storageModeMatches) {
+          await updateAlias(perDatasetIndex);
+          const duration = Date.now() - startTime;
+          return NextResponse.json({
+            success: true,
+            esIndex: perDatasetIndex,
+            alias: LANCE_ALIAS,
+            totalDocuments: expectedVectorsHint,
+            indexedDocuments: existingDatasetDocs,
+            duration: `${duration}ms`,
+            shardCount: effectiveShardCount,
+            shardingStrategy: effectiveProfile.shardingStrategy,
+            dims: effectiveProfile.dims,
+            message: `Dataset "${dataset}" is already backfilled (${existingDatasetDocs} docs). Alias "${LANCE_ALIAS}" updated.`,
+          });
+        }
+        console.info(
+          `Rebuilding "${perDatasetIndex}" due to storage mapping mismatch (expected shardAware=${shouldUseShardAwareStorage})`
+        );
+      }
+    }
+
+    // Rebuild per-dataset index to guarantee mapping/profile consistency with source Lance dataset.
+    if (alreadyIndexed) {
+      await deleteESIndex(perDatasetIndex);
+    }
+
+    // Create temp directory
+    tempDir = `/tmp/lance-backfill-${Date.now()}`;
+    await fs.mkdir(tempDir, { recursive: true });
 
     // Download all files
     for (const obj of result.objects) {
@@ -379,7 +560,7 @@ export async function POST(request: NextRequest) {
       if (!('name' in obj) || !obj.name) continue;
 
       const objectKey = obj.name;
-      const relativePath = objectKey.replace(`${datasetPath}/`, "");
+      const relativePath = objectKey.replace(datasetPrefix, "");
       const localFilePath = `${tempDir}/${relativePath}`;
 
       // Ensure directory exists
@@ -403,57 +584,131 @@ import json
 
 dataset_path = "${tempDir}"
 
-# Open database using LanceDB (new API)
-db = lancedb.connect(dataset_path)
+def extract_table_names(db):
+    tables_response = db.list_tables()
+    if isinstance(tables_response, list):
+        return list(tables_response)
+    if hasattr(tables_response, 'tables'):
+        return list(tables_response.tables)
+    if hasattr(tables_response, 'names'):
+        return list(tables_response.names)
 
-# Get table names - ListTablesResponse has .tables attribute
-tables_response = db.list_tables()
-if hasattr(tables_response, 'tables'):
-    table_names = tables_response.tables
-elif hasattr(tables_response, 'names'):
-    table_names = tables_response.names
-else:
-    # Fallback: extract from tuples
     table_names = []
-    for item in list(tables_response):
-        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], list):
-            table_names.extend(item[1])
+    try:
+        items = list(tables_response)
+    except Exception:
+        items = []
 
-# Open the first available table
-table = db.open_table(table_names[0])
+    for item in items:
+        if isinstance(item, str):
+            table_names.append(item)
+            continue
+        if isinstance(item, tuple):
+            for part in item:
+                if isinstance(part, str):
+                    table_names.append(part)
+                elif isinstance(part, list):
+                    table_names.extend([x for x in part if isinstance(x, str)])
 
-# Get total count
-total = table.count_rows()
+    return table_names
 
-# Load all documents without vectors (vectors stored in Lance, not ES)
-arrow_table = table.to_arrow()
-data = arrow_table.to_pandas()
+# Support both legacy single-root datasets and shard-aware layouts:
+# - /tmp/...             (contains data.lance/)
+# - /tmp/.../shard-0     (contains data.lance/), /tmp/.../shard-1, ...
+dataset_roots = []
+def add_root(path):
+    if path not in dataset_roots:
+        dataset_roots.append(path)
 
-# Select only metadata columns (exclude vector)
-columns_needed = ['_id', 'id', 'title', 'text', 'topic', 'category']
-available_columns = [col for col in columns_needed if col in data.columns]
-data = data[available_columns]
+for entry in sorted(os.listdir(dataset_path)):
+    if not entry.startswith('shard-'):
+        continue
+    shard_dir = os.path.join(dataset_path, entry)
+    if os.path.isdir(os.path.join(shard_dir, 'data.lance')):
+        # Preferred new layout root
+        add_root(shard_dir)
+        # Legacy fallback where create_dataset was called with ".../data.lance"
+        add_root(os.path.join(shard_dir, 'data.lance'))
 
-# Convert to list of dicts — handle missing columns gracefully
+if not dataset_roots:
+    add_root(dataset_path)
+    legacy_root = os.path.join(dataset_path, 'data.lance')
+    if os.path.isdir(legacy_root):
+        add_root(legacy_root)
+
+vector_dims = 0
+total = 0
 result = []
-for idx, row in data.iterrows():
-    def to_string(val):
-        if hasattr(val, 'item'):
-            val = val.item()
-        return str(val)
+opened_tables = 0
+open_errors = []
 
-    doc_id = to_string(row['_id']) if '_id' in available_columns else str(idx)
-    result.append({
-        '_id': doc_id,
-        'id': to_string(row['id']) if 'id' in available_columns else doc_id,
-        'title': to_string(row['title']) if 'title' in available_columns else f'Document {doc_id}',
-        'text': to_string(row['text']) if 'text' in available_columns else '',
-        'topic': to_string(row['topic']) if 'topic' in available_columns else 'general',
-        'category': to_string(row['category']) if 'category' in available_columns else 'uncategorized'
-    })
+for root in dataset_roots:
+    try:
+        db = lancedb.connect(root)
+        table_names = extract_table_names(db)
+        if not table_names:
+            continue
 
-# Output as JSON
-print(json.dumps({'documents': result, 'total': total}))
+        table = db.open_table(table_names[0])
+        opened_tables += 1
+        total += int(table.count_rows())
+
+        if vector_dims <= 0:
+            try:
+                schema = table.schema
+                for field in schema:
+                    if field.name == 'vector' and hasattr(field.type, 'list_size'):
+                        vector_dims = int(field.type.list_size)
+                        break
+            except Exception:
+                pass
+
+        # Load metadata rows; vectors remain in Lance storage.
+        data = table.to_arrow().to_pandas()
+
+        if vector_dims <= 0 and 'vector' in data.columns and len(data) > 0:
+            try:
+                sample_vector = data.iloc[0]['vector']
+                if hasattr(sample_vector, '__len__'):
+                    vector_dims = int(len(sample_vector))
+            except Exception:
+                pass
+
+        columns_needed = ['_id', 'id', 'title', 'text', 'topic', 'category']
+        available_columns = [col for col in columns_needed if col in data.columns]
+        if not available_columns:
+            continue
+        data = data[available_columns]
+
+        for idx, row in data.iterrows():
+            def to_string(val):
+                if hasattr(val, 'item'):
+                    val = val.item()
+                return str(val)
+
+            doc_id = to_string(row['_id']) if '_id' in available_columns else str(idx)
+            result.append({
+                '_id': doc_id,
+                'id': to_string(row['id']) if 'id' in available_columns else doc_id,
+                'title': to_string(row['title']) if 'title' in available_columns else f'Document {doc_id}',
+                'text': to_string(row['text']) if 'text' in available_columns else '',
+                'topic': to_string(row['topic']) if 'topic' in available_columns else 'general',
+                'category': to_string(row['category']) if 'category' in available_columns else 'uncategorized'
+            })
+    except Exception as exc:
+        open_errors.append(f"{root}: {exc}")
+
+if opened_tables == 0:
+    details = '; '.join(open_errors) if open_errors else 'no readable Lance tables found'
+    raise Exception(f"No tables found in LanceDB database roots under {dataset_path} ({details})")
+
+# Output as JSON and bypass interpreter finalizers.
+# LanceDB/PyArrow can occasionally crash during Python shutdown with:
+# "PyGILState_Release ... runtime state: finalizing".
+payload = json.dumps({'documents': result, 'total': total, 'vector_dims': vector_dims})
+sys.stdout.write(payload)
+sys.stdout.flush()
+os._exit(0)
 `;
 
     const { stdout } = await execAsync(
@@ -462,6 +717,38 @@ print(json.dumps({'documents': result, 'total': total}))
 
     const parsedOutput = JSON.parse(stdout.trim());
     const documents: DocumentMetadata[] = parsedOutput.documents;
+
+    const inferredDimsRaw = Number(parsedOutput.vector_dims || 0);
+    const inferredDims = Number.isFinite(inferredDimsRaw) && inferredDimsRaw > 0
+      ? Math.floor(inferredDimsRaw)
+      : 0;
+    const resolvedDims = inferredDims > 0 ? inferredDims : effectiveProfile.dims;
+
+    if (inferredDims > 0 && inferredDims !== effectiveProfile.dims) {
+      console.warn(
+        `Dataset "${dataset}" metadata dims=${effectiveProfile.dims} mismatch Lance dims=${inferredDims}; using Lance dims for index mapping`
+      );
+
+      // Persist corrected dims so future list/backfill/search flows stay consistent.
+      try {
+        const correctedMetadata = {
+          ...(datasetMetadata || {}),
+          version: Number((datasetMetadata as any)?.version || 1),
+          dataset,
+          vectors: documents.length,
+          dims: inferredDims,
+          shard_count: effectiveShardCount,
+          sharding_strategy: effectiveProfile.shardingStrategy,
+          dataset_name: effectiveProfile.datasetName || (datasetMetadata as any)?.dataset_name || 'data.lance',
+        };
+        await client.put(
+          metadataKey,
+          Buffer.from(JSON.stringify(correctedMetadata, null, 2), 'utf-8')
+        );
+      } catch (metadataWriteError: any) {
+        console.warn(`Failed to persist corrected metadata for dataset "${dataset}":`, metadataWriteError?.message || metadataWriteError);
+      }
+    }
 
     if (documents.length === 0) {
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -478,9 +765,20 @@ print(json.dumps({'documents': result, 'total': total}))
     if (createIndex) {
       try {
         // Construct OSS URI for lance_vector field
-        // IMPORTANT: Lance dataset path MUST include /data.lance/ suffix
-        const datasetUri = `oss://denny-test-lance/${datasetPath}/data.lance/`;
-        await createESIndex(perDatasetIndex, datasetUri, dims);
+        // IMPORTANT: Lance dataset path MUST include /data.lance/ suffix.
+        // Legacy datasets may be nested as /data.lance/data.lance/.
+        const datasetUri = hasLegacyNestedSingleLayout
+          ? `oss://denny-test-lance/${datasetPath}/data.lance/data.lance/`
+          : `oss://denny-test-lance/${datasetPath}/data.lance/`;
+
+        await createESIndex(perDatasetIndex, datasetUri, resolvedDims, {
+          shardCount: effectiveShardCount,
+          shardingStrategy: effectiveProfile.shardingStrategy,
+          shardPath: resolvedShardPath,
+          datasetName: storageDatasetName,
+          uriPrefix: resolvedUriPrefix,
+          fieldMapping: effectiveProfile.fieldMapping,
+        });
       } catch (error: any) {
         // Index might already exist, log but continue
         console.warn('Index creation warning:', error.message);
@@ -514,18 +812,23 @@ print(json.dumps({'documents': result, 'total': total}))
       totalDocuments: documents.length,
       indexedDocuments: indexedCount,
       duration: `${duration}ms`,
+      shardCount: effectiveShardCount,
+      shardingStrategy: effectiveProfile.shardingStrategy,
+      dims: resolvedDims,
       message: `Successfully backfilled ${indexedCount} documents to "${perDatasetIndex}" and updated alias "${LANCE_ALIAS}".`,
     });
   } catch (error: any) {
     console.error("Backfill failed:", error);
 
     // Cleanup on error
-    try {
-      await fs.rm(`/tmp/lance-backfill-${Date.now()}`, {
-        recursive: true,
-        force: true,
-      });
-    } catch {}
+    if (tempDir) {
+      try {
+        await fs.rm(tempDir, {
+          recursive: true,
+          force: true,
+        });
+      } catch {}
+    }
 
     return NextResponse.json({
       success: false,

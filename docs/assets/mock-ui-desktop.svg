@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f4f7fb"/>
+      <stop offset="100%" stop-color="#e8eef9"/>
+    </linearGradient>
+    <style>
+      .title { font: 700 24px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .h2 { font: 700 18px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #1e293b; }
+      .label { font: 600 13px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #334155; }
+      .text { font: 500 12px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #475569; }
+      .chip { font: 700 11px 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="920" fill="url(#bg)"/>
+
+  <rect x="24" y="20" width="1352" height="58" rx="10" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="44" y="56" class="title">核心能力演示台  Demo Console</text>
+  <rect x="1040" y="34" width="154" height="30" rx="8" fill="#dbeafe"/>
+  <text x="1070" y="54" class="label">场景预设 ▼</text>
+  <rect x="1208" y="34" width="148" height="30" rx="8" fill="#f1f5f9"/>
+  <text x="1242" y="54" class="label">重置配置</text>
+
+  <rect x="24" y="92" width="1352" height="52" rx="10" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="44" y="124" class="label">数据集: real-87k-dims-768</text>
+  <rect x="352" y="106" width="90" height="26" rx="7" fill="#eef2ff"/>
+  <text x="385" y="123" class="chip">刷新</text>
+  <rect x="1128" y="106" width="230" height="26" rx="13" fill="#dcfce7"/>
+  <text x="1156" y="123" class="chip">状态: 已就绪 (GREEN)</text>
+
+  <rect x="24" y="160" width="436" height="220" rx="12" fill="#ffffff" stroke="#cfe0ff"/>
+  <text x="44" y="192" class="h2">多分片配置</text>
+  <text x="44" y="220" class="label">分片数</text>
+  <rect x="100" y="204" width="230" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="114" y="223" class="text">1 | 2 | 4 | 8</text>
+  <text x="44" y="258" class="label">路由策略</text>
+  <rect x="118" y="242" width="212" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="132" y="261" class="text">ES_ROUTING ▼</text>
+  <text x="44" y="296" class="label">shard_path</text>
+  <rect x="132" y="280" width="286" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="146" y="299" class="text">{index}/shard-{id}</text>
+  <rect x="44" y="324" width="170" height="34" rx="8" fill="#2563eb"/>
+  <text x="74" y="346" style="font:700 13px sans-serif; fill:#fff;">重建并切换索引</text>
+  <text x="232" y="346" class="text">当前: shards=4</text>
+
+  <rect x="482" y="160" width="436" height="220" rx="12" fill="#ffffff" stroke="#cfe0ff"/>
+  <text x="502" y="192" class="h2">NRT 配置</text>
+  <text x="502" y="220" class="label">自动刷新</text>
+  <rect x="582" y="204" width="90" height="28" rx="14" fill="#22c55e"/>
+  <circle cx="656" cy="218" r="11" fill="#fff"/>
+  <text x="594" y="223" style="font:700 11px sans-serif; fill:#fff;">ON</text>
+  <text x="502" y="258" class="label">刷新间隔</text>
+  <rect x="580" y="242" width="120" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="600" y="261" class="text">30s</text>
+  <rect x="710" y="242" width="86" height="28" rx="7" fill="#e2e8f0"/>
+  <text x="738" y="261" class="text">应用</text>
+  <rect x="502" y="282" width="170" height="32" rx="8" fill="#0ea5e9"/>
+  <text x="524" y="303" style="font:700 13px sans-serif; fill:#fff;">手动刷新 Lance</text>
+  <text x="502" y="340" class="text">最近刷新: 2026-02-10 16:22:31</text>
+  <text x="502" y="360" class="text">cache=3  memory=128MB  health=GREEN</text>
+
+  <rect x="940" y="160" width="436" height="220" rx="12" fill="#ffffff" stroke="#cfe0ff"/>
+  <text x="960" y="192" class="h2">Prefilter 配置</text>
+  <text x="960" y="220" class="label">启用过滤</text>
+  <rect x="1040" y="204" width="24" height="24" rx="5" fill="#2563eb"/>
+  <path d="M1046 216 L1052 222 L1062 208" stroke="#fff" stroke-width="2.5" fill="none"/>
+  <text x="960" y="258" class="label">字段</text>
+  <rect x="1002" y="242" width="132" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="1016" y="261" class="text">category ▼</text>
+  <text x="1148" y="258" class="label">值</text>
+  <rect x="1178" y="242" width="180" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="1192" y="261" class="text">electronics</text>
+  <text x="960" y="296" class="label">nprobes</text>
+  <rect x="1018" y="280" width="82" height="28" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="1048" y="299" class="text">20</text>
+  <text x="960" y="340" class="text">策略: AUTO (按匹配规模自动选择)</text>
+  <text x="960" y="360" class="text">状态: SQL下推成功</text>
+
+  <rect x="24" y="396" width="1352" height="116" rx="12" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="44" y="426" class="h2">搜索工作台</text>
+  <rect x="44" y="442" width="88" height="30" rx="8" fill="#2563eb"/>
+  <text x="76" y="462" style="font:700 12px sans-serif; fill:#fff;">kNN</text>
+  <rect x="140" y="442" width="88" height="30" rx="8" fill="#e2e8f0"/>
+  <text x="166" y="462" class="chip">Hybrid</text>
+  <text x="246" y="461" class="label">Top-K</text>
+  <rect x="292" y="442" width="70" height="30" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="322" y="462" class="text">5</text>
+  <text x="380" y="461" class="label">Query</text>
+  <rect x="426" y="442" width="664" height="30" rx="7" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="440" y="462" class="text">machine learning retrieval optimization...</text>
+  <rect x="1110" y="442" width="148" height="30" rx="8" fill="#1d4ed8"/>
+  <text x="1150" y="462" style="font:700 12px sans-serif; fill:#fff;">执行搜索</text>
+
+  <rect x="24" y="528" width="870" height="368" rx="12" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="44" y="558" class="h2">结果区</text>
+  <rect x="44" y="574" width="830" height="90" rx="10" fill="#f8fafc" stroke="#dbe4f0"/>
+  <text x="62" y="600" class="label">#1 doc_123   score: 0.9123   match: HYBRID</text>
+  <rect x="62" y="612" width="180" height="22" rx="11" fill="#dcfce7"/>
+  <text x="78" y="627" class="chip">分片证据 shard=2/4</text>
+  <rect x="252" y="612" width="248" height="22" rx="11" fill="#dbeafe"/>
+  <text x="270" y="627" class="chip">过滤证据 SQL: category='electronics'</text>
+  <rect x="510" y="612" width="190" height="22" rx="11" fill="#fef3c7"/>
+  <text x="530" y="627" class="chip">NRT: 刷新于 16:22:31</text>
+  <text x="62" y="650" class="text">摘要: 该文档说明了向量召回与过滤协同路径...</text>
+
+  <rect x="916" y="528" width="460" height="174" rx="12" fill="#ffffff" stroke="#dbe4f0"/>
+  <text x="936" y="558" class="h2">性能与统计</text>
+  <text x="936" y="586" class="text">P50: 34ms   P95: 61ms   回退率: 1.2%</text>
+  <polyline points="936,654 980,632 1024,640 1068,610 1112,624 1156,604 1200,616 1244,598 1288,608"
+            fill="none" stroke="#0ea5e9" stroke-width="3"/>
+  <line x1="936" y1="666" x2="1336" y2="666" stroke="#cbd5e1"/>
+
+  <rect x="916" y="722" width="460" height="174" rx="12" fill="#0f172a"/>
+  <text x="936" y="752" style="font:700 17px sans-serif; fill:#f8fafc;">ES 请求 JSON</text>
+  <text x="936" y="782" style="font:500 12px monospace; fill:#e2e8f0;">{"query":{"bool":{"filter":[{"term":{"category":"electronics"}}]}}</text>
+  <text x="936" y="804" style="font:500 12px monospace; fill:#e2e8f0;">"knn":{"field":"vector","k":5,"num_candidates":200}}</text>
+  <text x="936" y="826" style="font:500 12px monospace; fill:#e2e8f0;">"ext":{"lance":{"nprobes":20,"prefilter":"AUTO"}}}</text>
+</svg>

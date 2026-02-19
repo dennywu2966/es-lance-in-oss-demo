@@ -1,0 +1,389 @@
+<style>
+  body {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+    color: #0f172a;
+    background: #f8fafc;
+    line-height: 1.65;
+    font-family: "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+  }
+  figure {
+    margin: 16px 0;
+    padding: 12px;
+    border: 1px solid #dbe4f0;
+    border-radius: 10px;
+    background: #ffffff;
+  }
+  figcaption {
+    margin-top: 10px;
+    color: #475569;
+    font-size: 14px;
+  }
+  .mock-svg {
+    width: 100%;
+    min-height: 320px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #ffffff;
+  }
+</style>
+<h1 id="prd-demo-ui-upgrade-for-multi-sharding-nrt-and-prefiltering">PRD: Demo UI Upgrade for Multi-Sharding, NRT, and Prefiltering</h1>
+<h2 id="document-info">1. Document Info</h2>
+<ul>
+<li>Product: <code>es-lance-demo</code> Live Demo</li>
+<li>Version: <code>v1.0</code></li>
+<li>Date: <code>2026-02-10</code></li>
+<li>Owner: Demo Experience / Search Platform</li>
+<li>Related plan: <code>docs/demo_ui_server_nt_scale_plan.md</code></li>
+</ul>
+<h2 id="background">2. Background</h2>
+<p>Current demo UI can run kNN/hybrid queries, show timing, and inspect ES request JSON. It is strong for baseline search demos, but not yet structured to clearly demonstrate the three new core features:</p>
+<ol type="1">
+<li>Multi-sharding behavior</li>
+<li>Near-real-time refresh (NRT)</li>
+<li>Prefiltering strategy and fallback path</li>
+</ol>
+<p>The goal of this PRD is to define an explicit UI redesign and supporting API updates so the demo can be used in technical presentations and validation sessions with a clear narrative in Chinese.</p>
+<h2 id="product-goal">3. Product Goal</h2>
+<p>Build a <strong>Capability Demo Console</strong> in the existing Live Demo area so a presenter can:</p>
+<ol type="1">
+<li>Configure core plugin behaviors from UI</li>
+<li>Run controlled experiments (before/after)</li>
+<li>Observe outcome and timing in one screen</li>
+<li>Explain the path in Chinese without code switching to terminal</li>
+</ol>
+<h2 id="success-criteria">4. Success Criteria</h2>
+<ul>
+<li>Presenter can finish a full 3-feature demo in &lt;= 8 minutes.</li>
+<li>Each feature has dedicated controls + status + result evidence in UI.</li>
+<li>UI can show not only “query succeeded” but “which strategy was used”.</li>
+<li>Chinese labels are complete for all new controls and status messages.</li>
+<li>No regression in existing search flow (<code>kNN</code>, <code>Hybrid</code>, <code>Show ES Request</code>, result expansion).</li>
+</ul>
+<h2 id="users-main-scenario">5. Users &amp; Main Scenario</h2>
+<h3 id="primary-user">Primary user</h3>
+<ul>
+<li>Internal engineer / solutions architect doing live demos.</li>
+</ul>
+<h3 id="core-scenario">Core scenario</h3>
+<ol type="1">
+<li>Open Live Demo.</li>
+<li>Select dataset and scenario preset.</li>
+<li>Configure sharding / refresh / prefilter knobs.</li>
+<li>Execute search.</li>
+<li>Show timeline + query + feature-specific evidence.</li>
+<li>Switch scenario and repeat.</li>
+</ol>
+<h2 id="scope">6. Scope</h2>
+<h3 id="in-scope">In scope</h3>
+<ul>
+<li>New UI sections and Chinese UX copy</li>
+<li>New frontend states and feature controls</li>
+<li>New server proxy APIs for Lance stats/refresh/config</li>
+<li>Search API extension for filter / nprobes</li>
+<li>Backfill/index creation extension for shard-aware mapping options</li>
+</ul>
+<h3 id="out-of-scope">Out of scope</h3>
+<ul>
+<li>New plugin algorithm development in ES codebase</li>
+<li>Cross-cluster demo orchestration</li>
+<li>Full observability dashboard in Kibana (only linked/optional)</li>
+</ul>
+<h2 id="ux-principles">7. UX Principles</h2>
+<ol type="1">
+<li><strong>One screen demo</strong>: avoid context switching to CLI.</li>
+<li><strong>Explain by evidence</strong>: each feature must have visible proof.</li>
+<li><strong>Safe defaults</strong>: controls default to known-good settings.</li>
+<li><strong>Progressive disclosure</strong>: advanced knobs collapsed by default.</li>
+<li><strong>Chinese-first copy</strong> with technical keywords preserved (NRT, Prefilter, ES_ROUTING).</li>
+</ol>
+<h2 id="information-architecture-live-demo-section">8. Information Architecture (Live Demo section)</h2>
+<p>New layout inside current <code>LiveDemo</code>:</p>
+<ol type="1">
+<li>Capability Header (new)</li>
+<li>Dataset Selector (existing, upgraded copy)</li>
+<li>Feature Control Panels (new):
+<ul>
+<li>Multi-Sharding</li>
+<li>NRT Refresh</li>
+<li>Prefiltering</li>
+</ul></li>
+<li>Search Workbench (existing controls, expanded)</li>
+<li>Result Explorer (existing results, upgraded annotations)</li>
+<li>Observability Area:
+<ul>
+<li>Performance Profiling (existing)</li>
+<li>Performance Timeline (existing hybrid)</li>
+<li>Lance Stats Snapshot (new)</li>
+<li>ES Request Viewer (existing)</li>
+</ul></li>
+</ol>
+<h2 id="ui-mockups-wireframes-focus-on-ui-changes">9. UI Mockups &amp; Wireframes (Focus on UI Changes)</h2>
+<h2 id="high-fidelity-mock-desktop">9.1 High-fidelity mock (desktop)</h2>
+<figure>
+<object data="assets/mock-ui-desktop.svg" type="image/svg+xml" class="mock-svg">
+<img src="assets/mock-ui-desktop.png" alt="Demo Console Desktop Mock" />
+</object><figcaption>Demo Console Desktop Mock (SVG primary, PNG fallback)</figcaption>
+</figure>
+<p><code>SVG backup:</code> <a href="assets/mock-ui-desktop.svg">assets/mock-ui-desktop.svg</a></p>
+<p>Design intent: - Keep the full demo path in one screen: configure -&gt; run -&gt; explain evidence. - Put three capability cards at the top fold: Multi-sharding, NRT, Prefilter. - Reserve right-bottom for ES request JSON so presenters can prove backend request shape. - Keep evidence chips in result cards and place them above summary text.</p>
+<h2 id="high-fidelity-mock-mobile">9.2 High-fidelity mock (mobile)</h2>
+<figure>
+<object data="assets/mock-ui-mobile.svg" type="image/svg+xml" class="mock-svg">
+<img src="assets/mock-ui-mobile.png" alt="Demo Console Mobile Mock" />
+</object><figcaption>Demo Console Mobile Mock (SVG primary, PNG fallback)</figcaption>
+</figure>
+<p><code>SVG backup:</code> <a href="assets/mock-ui-mobile.svg">assets/mock-ui-mobile.svg</a></p>
+<p>Design intent: - Force stacked cards on mobile to avoid horizontal clipping for Chinese labels. - Keep capability controls as first-class cards, not hidden in advanced drawers. - Maintain result evidence chips even on small screens.</p>
+<h2 id="result-card-evidence-mock">9.3 Result card evidence mock</h2>
+<figure>
+<object data="assets/mock-ui-result-evidence.svg" type="image/svg+xml" class="mock-svg">
+<img src="assets/mock-ui-result-evidence.png" alt="Result Card Evidence Mock" />
+</object><figcaption>Result Card Evidence Mock (SVG primary, PNG fallback)</figcaption>
+</figure>
+<p><code>SVG backup:</code> <a href="assets/mock-ui-result-evidence.svg">assets/mock-ui-result-evidence.svg</a></p>
+<p>Design intent: - Promote evidence first, content second. - Freeze three evidence dimensions in top region: shard, prefilter, NRT. - Show fallback state as explicit pill to avoid ambiguity during demos.</p>
+<h2 id="interaction-states-for-demo-script">9.4 Interaction states for demo script</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>State</th>
+<th>UI signal</th>
+<th>Presenter message (Chinese)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Idle</td>
+<td>All cards editable, <code>执行搜索</code> enabled</td>
+<td>当前配置已就绪，准备开始实验</td>
+</tr>
+<tr class="even">
+<td>Rebuilding index</td>
+<td>Multi-sharding card shows progress + disabled search</td>
+<td>正在重建分片索引，请稍候</td>
+</tr>
+<tr class="odd">
+<td>Refreshing NRT</td>
+<td>NRT card shows spinner + last refresh pending</td>
+<td>正在刷新近实时缓存</td>
+</tr>
+<tr class="even">
+<td>Query running</td>
+<td>Search button loading, result area skeleton</td>
+<td>正在执行查询并收集证据</td>
+</tr>
+<tr class="odd">
+<td>Query success</td>
+<td>Evidence chips + timeline rendered</td>
+<td>查询完成，下面看路径证据</td>
+</tr>
+<tr class="even">
+<td>Prefilter fallback</td>
+<td>Warning pill in result + detail in JSON</td>
+<td>命中过滤回退路径，已标注原因</td>
+</tr>
+</tbody>
+</table>
+<h2 id="low-fidelity-wireframe-reference">9.5 Low-fidelity wireframe (reference)</h2>
+<pre class="text"><code>[核心能力演示台]
+  ├─ [多分片配置]
+  ├─ [NRT 配置]
+  ├─ [Prefilter 配置]
+  ├─ [搜索工作台]
+  ├─ [结果区 + 证据标签]
+  ├─ [性能时间线]
+  └─ [ES 请求 JSON]</code></pre>
+<h2 id="ui-changes-by-existing-files">10. UI Changes by Existing Files</h2>
+<h2 id="featureslive-demouilive-demo.tsx">10.1 <code>features/live-demo/ui/live-demo.tsx</code></h2>
+<h3 id="add">Add</h3>
+<ul>
+<li>New state groups:
+<ul>
+<li><code>shardingConfig</code></li>
+<li><code>nrtConfig</code></li>
+<li><code>prefilterConfig</code></li>
+<li><code>featureStatus</code></li>
+<li><code>demoPreset</code></li>
+</ul></li>
+<li>New API calls:
+<ul>
+<li><code>/api/lance/stats</code></li>
+<li><code>/api/lance/refresh</code></li>
+<li><code>/api/lance/refresh-config</code></li>
+</ul></li>
+<li>New “Capability Header” and three control cards.</li>
+<li>New metadata line for feature evidence after each search.</li>
+</ul>
+<h3 id="change">Change</h3>
+<ul>
+<li>Existing dataset switch flow: keep current behavior, add shard-aware options when invoking backfill.</li>
+<li>Existing search request body: include <code>filter</code> and optional <code>nprobes</code>.</li>
+</ul>
+<h2 id="featureslive-demouisearch-controls.tsx">10.2 <code>features/live-demo/ui/search-controls.tsx</code></h2>
+<h3 id="add-1">Add</h3>
+<ul>
+<li>Filter enable toggle</li>
+<li>Field selector (<code>category</code>, <code>topic</code>, <code>dataset</code>)</li>
+<li>Term value input</li>
+<li>nprobes input (advanced)</li>
+</ul>
+<h3 id="change-1">Change</h3>
+<ul>
+<li>Top-K input logic should preserve explicit 0/invalid handling using nullish-safe parsing (avoid <code>||</code> traps).</li>
+</ul>
+<h2 id="featureslive-demouiresults-display.tsx">10.3 <code>features/live-demo/ui/results-display.tsx</code></h2>
+<h3 id="add-2">Add</h3>
+<ul>
+<li>“Feature Evidence” block:
+<ul>
+<li>shard mode</li>
+<li>refresh status timestamp</li>
+<li>prefilter decision</li>
+</ul></li>
+<li>Dedicated warning pill when fallback path used.</li>
+</ul>
+<h3 id="change-2">Change</h3>
+<ul>
+<li>Keep existing timeline and profiling, but prepend Chinese labels.</li>
+</ul>
+<h2 id="api-contract-changes">11. API &amp; Contract Changes</h2>
+<h2 id="search-api">11.1 Search API</h2>
+<h3 id="post-apisearch"><code>POST /api/search</code></h3>
+<p>New request fields: - <code>filter?: object | object[]</code> - <code>nprobes?: number</code></p>
+<p>Example:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="fu">{</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a>  <span class="dt">&quot;dataset&quot;</span><span class="fu">:</span> <span class="st">&quot;real-87k-dims-768&quot;</span><span class="fu">,</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>  <span class="dt">&quot;k&quot;</span><span class="fu">:</span> <span class="dv">5</span><span class="fu">,</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true"></a>  <span class="dt">&quot;numCandidates&quot;</span><span class="fu">:</span> <span class="dv">10</span><span class="fu">,</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true"></a>  <span class="dt">&quot;profile&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true"></a>  <span class="dt">&quot;queryVector&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="fl">0.1</span><span class="ot">,</span> <span class="fl">0.2</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true"></a>  <span class="dt">&quot;filter&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;term&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;category&quot;</span><span class="fu">:</span> <span class="st">&quot;electronics&quot;</span> <span class="fu">}</span> <span class="fu">},</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true"></a>  <span class="dt">&quot;nprobes&quot;</span><span class="fu">:</span> <span class="dv">20</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true"></a><span class="fu">}</span></span></code></pre></div>
+<h2 id="hybrid-api">11.2 Hybrid API</h2>
+<h3 id="post-apisearchhybrid"><code>POST /api/search/hybrid</code></h3>
+<p>Vector branch supports same filter/nprobes pass-through for Lance query.</p>
+<h2 id="new-lance-proxy-apis">11.3 New Lance proxy APIs</h2>
+<ol type="1">
+<li><code>GET /api/lance/stats</code>
+<ul>
+<li>proxy to <code>GET /_lance/stats</code></li>
+</ul></li>
+<li><code>POST /api/lance/refresh</code>
+<ul>
+<li>proxy to <code>POST /_lance/refresh</code></li>
+</ul></li>
+<li><code>GET /api/lance/refresh-config</code>
+<ul>
+<li>return <code>lance.refresh.enabled</code>, <code>lance.refresh.interval</code></li>
+</ul></li>
+<li><code>PUT /api/lance/refresh-config</code>
+<ul>
+<li>update cluster settings (with permission-safe error handling)</li>
+</ul></li>
+</ol>
+<h2 id="backfill-extension">11.4 Backfill extension</h2>
+<h3 id="post-apivectorsbackfill"><code>POST /api/vectors/backfill</code></h3>
+<p>New request fields: - <code>numberOfShards</code> - <code>shardAware</code> - <code>uriPrefix</code> - <code>shardPath</code> - <code>datasetName</code> - <code>shardingStrategy</code> - <code>fieldMapping</code></p>
+<p>If <code>shardAware=true</code>, mapping for <code>embedding.storage</code> uses shard-aware fields.</p>
+<h2 id="ux-states-new">12. UX States (New)</h2>
+<h2 id="multi-sharding">12.1 Multi-sharding</h2>
+<ul>
+<li>Idle: shows current index + strategy.</li>
+<li>Switching: spinner + “正在重建分片索引…”.</li>
+<li>Success: green badge with shard summary.</li>
+<li>Failure: red alert with returned error and recovery hint.</li>
+</ul>
+<h2 id="nrt">12.2 NRT</h2>
+<ul>
+<li>Auto refresh enabled/disabled badge.</li>
+<li>Manual refresh in progress state.</li>
+<li>Stats stale indicator if last poll &gt; 60s.</li>
+</ul>
+<h2 id="prefilter">12.3 Prefilter</h2>
+<ul>
+<li>Applied: green “已下推到 Lance SQL”.</li>
+<li>Fallback: amber “下推失败，已回退 ES 后过滤”.</li>
+<li>No filter: neutral “未启用过滤条件”.</li>
+</ul>
+<h2 id="chinese-copy-key-labels">13. Chinese Copy (Key Labels)</h2>
+<ul>
+<li>核心能力演示台</li>
+<li>多分片配置</li>
+<li>近实时刷新（NRT）</li>
+<li>预过滤（Prefilter）</li>
+<li>手动刷新 Lance 缓存</li>
+<li>重建并切换索引</li>
+<li>预过滤状态</li>
+<li>已回退到 ES 后过滤</li>
+</ul>
+<h2 id="non-functional-requirements">14. Non-Functional Requirements</h2>
+<ul>
+<li>New controls should not add &gt; 100ms UI-side overhead per interaction.</li>
+<li>Polling for stats default 10s, pause while tab not focused.</li>
+<li>All new components must follow existing visual language (<code>glass-card</code>, gradient buttons).</li>
+<li>Mobile support: no horizontal overflow at 375px width.</li>
+</ul>
+<h2 id="instrumentation">15. Instrumentation</h2>
+<p>Add frontend-level event hooks (console/logger acceptable for demo phase): - <code>demo.sharding.apply</code> - <code>demo.nrt.refresh.manual</code> - <code>demo.prefilter.toggle</code> - <code>demo.search.execute</code></p>
+<p>Add response metadata fields in API result where possible: - <code>featureEvidence.sharding</code> - <code>featureEvidence.prefilter</code> - <code>featureEvidence.refresh</code></p>
+<h2 id="acceptance-criteria">16. Acceptance Criteria</h2>
+<h2 id="ux-acceptance">16.1 UX Acceptance</h2>
+<ul>
+<li>Presenter can complete 3 feature demos in one page without terminal.</li>
+<li>All new controls and status text are Chinese.</li>
+<li>ES Request panel reflects active filter/sharding related query changes.</li>
+</ul>
+<h2 id="functional-acceptance">16.2 Functional Acceptance</h2>
+<ul>
+<li>Shard-aware mapping created successfully when selected.</li>
+<li>Manual refresh API is callable and status visible.</li>
+<li>Filtered query executes with either pushdown or fallback, and UI indicates which.</li>
+</ul>
+<h2 id="regression-acceptance">16.3 Regression Acceptance</h2>
+<ul>
+<li>Existing <code>kNN</code> and <code>Hybrid</code> flows still work.</li>
+<li>Existing result expand/collapse and ES request viewer still work.</li>
+</ul>
+<h2 id="qa-checklist">17. QA Checklist</h2>
+<ol type="1">
+<li>No dataset: warning shown, controls disabled correctly.</li>
+<li>Invalid refresh interval: validation message shown.</li>
+<li>Invalid filter JSON/input: request blocked client-side.</li>
+<li>ES unavailable: API failure surfaced with actionable hint.</li>
+<li>Strategy switch from <code>ES_ROUTING</code> to <code>NONE</code> updates evidence line.</li>
+</ol>
+<h2 id="rollout-plan">18. Rollout Plan</h2>
+<h3 id="phase-1">Phase 1</h3>
+<ul>
+<li>API proxy + data contracts + backfill extension.</li>
+</ul>
+<h3 id="phase-2">Phase 2</h3>
+<ul>
+<li>UI cards + state wiring + Chinese copy.</li>
+</ul>
+<h3 id="phase-3">Phase 3</h3>
+<ul>
+<li>Evidence rendering + test script + demo rehearsal.</li>
+</ul>
+<h2 id="demo-script-chinese">19. Demo Script (Chinese)</h2>
+<ol type="1">
+<li>先运行基线：<code>1 shard + NONE + 无过滤</code>。</li>
+<li>切到 <code>4 shards + ES_ROUTING</code>，重建后同查询对比。</li>
+<li>开启过滤：<code>category=electronics</code>，展示下推/回退状态。</li>
+<li>手动触发 NRT 刷新，再次查询，展示刷新后状态与统计。</li>
+<li>打开 ES 请求 JSON，解释 DSL 与配置对应关系。</li>
+</ol>
+<h2 id="open-questions">20. Open Questions</h2>
+<ol type="1">
+<li>Cluster settings 写权限是否在所有 demo 环境可用？</li>
+<li>Prefilter evidence 口径是否以后端明确字段返回为准（建议是）？</li>
+<li>是否需要在 UI 中增加“示例过滤模板”以减少演示输入时间？</li>
+</ol>

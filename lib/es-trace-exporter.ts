@@ -69,7 +69,7 @@ export class ESTraceExporter implements SpanExporter {
       auth: config.auth,
       tls: config.tls || { rejectUnauthorized: false },
     });
-    this.indexPrefix = config.indexPrefix || 'traces-lance';
+    this.indexPrefix = config.indexPrefix || 'traces-lance-spans';
     this.serviceName = 'lance-demo';
     this.serviceVersion = '1.0.0';
   }

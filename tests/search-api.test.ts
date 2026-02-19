@@ -187,14 +187,16 @@ if PROFILE:
   describe('Parameter validation', () => {
     it('should enforce minimum k value of 1', () => {
       const k = 0;
-      const clampedK = Math.max(1, Math.min(50, k || 5));
+      const normalizedK = Number.isFinite(k) ? k : 5;
+      const clampedK = Math.max(1, Math.min(50, normalizedK));
 
       expect(clampedK).toBe(1);
     });
 
     it('should enforce maximum k value of 50', () => {
       const k = 100;
-      const clampedK = Math.max(1, Math.min(50, k || 5));
+      const normalizedK = Number.isFinite(k) ? k : 5;
+      const clampedK = Math.max(1, Math.min(50, normalizedK));
 
       expect(clampedK).toBe(50);
     });

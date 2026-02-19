@@ -86,56 +86,118 @@ sample_count = ${count}
 os.makedirs(temp_dir, exist_ok=True)
 
 print("Listing objects in OSS...", file=sys.stderr, flush=True)
-result = bucket.list_objects(prefix=oss_prefix)
-print(f"Found {len(result.object_list)} objects", file=sys.stderr, flush=True)
+all_object_keys = []
+marker = ''
+while True:
+    result = bucket.list_objects(prefix=oss_prefix, marker=marker, max_keys=1000)
+    for obj in result.object_list:
+        if not obj.key.endswith('/'):
+            all_object_keys.append(obj.key)
+    if not getattr(result, 'is_truncated', False):
+        break
+    marker = getattr(result, 'next_marker', '')
+    if not marker:
+        break
+
+print(f"Found {len(all_object_keys)} objects", file=sys.stderr, flush=True)
 
 downloaded = 0
-for obj in result.object_list:
-    if not obj.key.endswith('/'):
-        relative_path = obj.key.replace(oss_prefix, '')
-        local_file = os.path.join(temp_dir, relative_path)
-        os.makedirs(os.path.dirname(local_file), exist_ok=True)
-        object_data = bucket.get_object(obj.key)
-        with open(local_file, 'wb') as f:
-            f.write(object_data.read())
-        downloaded += 1
+downloaded_rel_paths = []
+for object_key in all_object_keys:
+    relative_path = object_key.replace(oss_prefix, '')
+    local_file = os.path.join(temp_dir, relative_path)
+    os.makedirs(os.path.dirname(local_file), exist_ok=True)
+    object_data = bucket.get_object(object_key)
+    with open(local_file, 'wb') as f:
+        f.write(object_data.read())
+    downloaded += 1
+    downloaded_rel_paths.append(relative_path)
 
 print(f"Downloaded {downloaded} files", file=sys.stderr, flush=True)
+if downloaded == 0:
+    raise Exception(f"No dataset objects found under prefix {oss_prefix}")
 
-# Open Lance dataset using lancedb (new API)
-db = lancedb.connect(temp_dir)
+def extract_table_names(db):
+    tables_response = db.list_tables()
+    if isinstance(tables_response, list):
+        return list(tables_response)
+    if hasattr(tables_response, 'tables'):
+        return list(tables_response.tables)
+    try:
+        return list(tables_response)
+    except Exception:
+        return []
 
-# Get table names - handle different LanceDB response formats
-tables_response = db.list_tables()
-if isinstance(tables_response, list):
-    table_names = tables_response
-elif hasattr(tables_response, 'tables'):
-    table_names = tables_response.tables
-else:
-    table_names = list(tables_response)
+dataset_roots = []
+def add_root(path):
+    if path not in dataset_roots:
+        dataset_roots.append(path)
 
-if not table_names:
+# Always include legacy roots first.
+add_root(temp_dir)
+legacy_root = os.path.join(temp_dir, 'data.lance')
+if os.path.isdir(legacy_root):
+    add_root(legacy_root)
+
+# Discover shard roots from downloaded object keys.
+discovered_shards = set()
+for rel_path in downloaded_rel_paths:
+    if rel_path.startswith('shard-'):
+        discovered_shards.add(rel_path.split('/', 1)[0])
+
+for shard_name in sorted(discovered_shards):
+    shard_dir = os.path.join(temp_dir, shard_name)
+    if os.path.isdir(shard_dir):
+        add_root(shard_dir)
+    shard_lance = os.path.join(shard_dir, 'data.lance')
+    if os.path.isdir(shard_lance):
+        add_root(shard_lance)
+
+# Also scan extracted filesystem in case object names were non-standard.
+for entry in sorted(os.listdir(temp_dir)):
+    if not entry.startswith('shard-'):
+        continue
+    shard_dir = os.path.join(temp_dir, entry)
+    if os.path.isdir(shard_dir):
+        add_root(shard_dir)
+    shard_lance = os.path.join(shard_dir, 'data.lance')
+    if os.path.isdir(shard_lance):
+        add_root(shard_lance)
+
+records = []
+total_count = 0
+opened_tables = 0
+
+for root in dataset_roots:
+    try:
+        db = lancedb.connect(root)
+        table_names = extract_table_names(db)
+        if not table_names:
+            continue
+
+        print(f"Found tables at {root}: {table_names}", file=sys.stderr, flush=True)
+        table = db.open_table(table_names[0])
+        opened_tables += 1
+        table_count = int(table.count_rows())
+        total_count += table_count
+        records.extend(table.to_pandas().to_dict(orient='records'))
+    except Exception as exc:
+        print(f"Skipping unreadable root {root}: {exc}", file=sys.stderr, flush=True)
+        continue
+
+if opened_tables == 0:
     raise Exception("No tables found in LanceDB database")
 
-print(f"Found tables: {table_names}", file=sys.stderr, flush=True)
+print(f"Dataset has {total_count} vectors across {opened_tables} table(s)", file=sys.stderr, flush=True)
 
-# Open the first table (usually 'data')
-table = db.open_table(table_names[0])
-
-# Get total count
-total_count = table.count_rows()
-print(f"Dataset has {total_count} vectors", file=sys.stderr, flush=True)
-
-# Sample random indices
-sample_indices = random.sample(range(min(total_count, sample_count * 10)), min(sample_count, total_count))
-
-# Fetch sampled vectors using to_pandas with row filter
-df = table.to_pandas()
-sampled_df = df.iloc[sample_indices]
+if total_count <= 0 or len(records) == 0:
+    sampled_records = []
+else:
+    sampled_records = random.sample(records, min(sample_count, len(records)))
 
 # Prepare results
 samples = []
-for idx, row in sampled_df.iterrows():
+for idx, row in enumerate(sampled_records):
     doc_id = row.get('_id', str(idx))
     vector_data = row.get('vector', [])
     category_data = row.get('category', 'unknown')

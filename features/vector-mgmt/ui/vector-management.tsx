@@ -13,11 +13,13 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Database, Trash2, RefreshCw, Plus, Upload, CheckCircle2, AlertCircle, FileText, X, Tag } from "lucide-react";
 import { slideUp } from "@/shared/lib/animations";
-import { listDatasets, generateDataset, deleteDataset, subscribeToJobProgress, type Dataset } from "../api/dataset-client";
+import { dispatchActiveDatasetChanged, dispatchDatasetCatalogChanged } from "@/lib/dataset-events";
+import { listDatasets, generateDataset, appendDataset, deleteDataset, subscribeToJobProgress, type Dataset } from "../api/dataset-client";
+import { estimateRemainingSeconds, formatRemainingTime } from "../lib/progress-estimate";
 
 interface Document {
   _id: string;
@@ -55,12 +57,25 @@ export function VectorManagement() {
   // Generation state
   const [vectors, setVectors] = useState(50);
   const [dims, setDims] = useState(128);
+  const [shardCount, setShardCount] = useState(1);
+  const [shardingStrategy, setShardingStrategy] = useState<'NONE' | 'ES_ROUTING'>('NONE');
   const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const [showAppendModal, setShowAppendModal] = useState(false);
+  const [appendVectors, setAppendVectors] = useState(10);
+  const [appendTargetShard, setAppendTargetShard] = useState<string>('auto');
 
   // Job progress state
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [jobStatus, setJobStatus] = useState<string>("");
+  const [progressMessage, setProgressMessage] = useState<string>("");
+  const [estimatedRemainingSec, setEstimatedRemainingSec] = useState<number | null>(null);
+  const [appendJobId, setAppendJobId] = useState<string | null>(null);
+  const [appendProgress, setAppendProgress] = useState(0);
+  const [appendStatus, setAppendStatus] = useState<string>("");
+  const [appendProgressMessage, setAppendProgressMessage] = useState<string>("");
+  const [appendEstimatedRemainingSec, setAppendEstimatedRemainingSec] = useState<number | null>(null);
+  const [isAppending, setIsAppending] = useState(false);
 
   // Documents viewer state
   const [documents, setDocuments] = useState<Document[] | null>(null);
@@ -72,35 +87,88 @@ export function VectorManagement() {
 
   // Selected dataset state
   const [selectedDataset, setSelectedDataset] = useState<string | null>(null);
+  const [pendingGeneratedDataset, setPendingGeneratedDataset] = useState<string | null>(null);
+  const activeSelectionSourceRef = useRef<"vector-management" | "live-demo">("vector-management");
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const selectDataset = (datasetName: string | null, source: "vector-management" | "live-demo" = "vector-management") => {
+    activeSelectionSourceRef.current = source;
+    setSelectedDataset((prev) => (prev === datasetName ? prev : datasetName));
+  };
 
   // Load datasets on mount
   useEffect(() => {
-    loadDatasets();
+    void loadDatasets();
   }, []);
 
   // Auto-select first dataset when datasets change
   useEffect(() => {
     if (datasets.length > 0 && !selectedDataset) {
-      setSelectedDataset(datasets[0].name);
+      selectDataset(datasets[0].name);
     } else if (datasets.length === 0) {
-      setSelectedDataset(null);
+      selectDataset(null);
     } else if (selectedDataset && !datasets.find(d => d.name === selectedDataset)) {
       // Selected dataset was deleted, select first available
-      setSelectedDataset(datasets[0]?.name || null);
+      selectDataset(datasets[0]?.name || null);
     }
   }, [datasets, selectedDataset]);
 
-  const loadDatasets = async () => {
+  useEffect(() => {
+    if (!pendingGeneratedDataset) {
+      return;
+    }
+    const exists = datasets.some((dataset) => dataset.name === pendingGeneratedDataset);
+    if (exists) {
+      selectDataset(pendingGeneratedDataset);
+      setPendingGeneratedDataset(null);
+    }
+  }, [datasets, pendingGeneratedDataset]);
+
+  useEffect(() => {
+    if (!selectedDataset) {
+      return;
+    }
+    dispatchActiveDatasetChanged({
+      datasetName: selectedDataset,
+      source: activeSelectionSourceRef.current,
+    });
+  }, [selectedDataset]);
+
+  useEffect(() => {
+    setAppendTargetShard("auto");
+  }, [selectedDataset]);
+
+  const loadDatasets = async (): Promise<Dataset[]> => {
     setIsLoading(true);
     setError(null);
     try {
       const result = await listDatasets();
-      setDatasets(result.datasets);
+      const nextDatasets = result.datasets || [];
+      setDatasets(nextDatasets);
+      return nextDatasets;
     } catch (err: any) {
       setError(err.message);
+      return [];
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const refreshDatasetsUntilVisible = async (datasetName?: string | null): Promise<Dataset[]> => {
+    const targetName = datasetName?.trim();
+    const maxAttempts = targetName ? 6 : 1;
+    let latestDatasets: Dataset[] = [];
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      latestDatasets = await loadDatasets();
+      if (!targetName || latestDatasets.some((dataset) => dataset.name === targetName)) {
+        return latestDatasets;
+      }
+      await sleep(1200);
+    }
+
+    return latestDatasets;
   };
 
   const handleGenerate = async () => {
@@ -110,10 +178,18 @@ export function VectorManagement() {
     setSuccess(null);
     setProgress(0);
     setJobStatus("");
+    setProgressMessage("Preparing generation job...");
+    const startedAtMs = Date.now();
+    setEstimatedRemainingSec(null);
 
     try {
       // Start generation
-      const result = await generateDataset({ vectors, dims });
+      const result = await generateDataset({
+        vectors,
+        dims,
+        shard_count: shardCount,
+        sharding_strategy: shardingStrategy,
+      });
       setJobId(result.job_id);
       setJobStatus("running");
 
@@ -122,18 +198,41 @@ export function VectorManagement() {
         onProgress: (prog, status, message) => {
           setProgress(prog);
           setJobStatus(status);
-          if (message) setSuccess(message);
+          if (message) setProgressMessage(message);
+          const remaining = estimateRemainingSeconds({
+            startedAtMs,
+            nowMs: Date.now(),
+            progressPercent: prog,
+          });
+          setEstimatedRemainingSec(remaining);
         },
         onComplete: (data) => {
           setProgress(100);
           setJobStatus("completed");
-          setSuccess(`Dataset generated: ${data.dataset_name} (${data.vectors} vectors, ${data.dims} dims)`);
+          const createdDatasetName = data?.dataset_name;
+          setProgressMessage("Dataset generation completed");
+          setEstimatedRemainingSec(0);
+          setPendingGeneratedDataset(createdDatasetName || null);
+          setSuccess(
+            `Dataset generated: ${data.dataset_name} (${data.vectors} vectors, ${data.dims} dims, shards=${shardCount}, strategy=${shardingStrategy})`
+          );
           setIsGenerating(false);
-          loadDatasets(); // Refresh list
+          void refreshDatasetsUntilVisible(createdDatasetName).then((latestDatasets) => {
+            if (createdDatasetName && latestDatasets.some((dataset) => dataset.name === createdDatasetName)) {
+              selectDataset(createdDatasetName);
+              setPendingGeneratedDataset(null);
+            }
+          }).finally(() => {
+            dispatchDatasetCatalogChanged({
+              reason: "generated",
+              datasetName: createdDatasetName,
+            });
+          });
         },
         onError: (err) => {
           setJobStatus("failed");
           setError(err);
+          setEstimatedRemainingSec(null);
           setIsGenerating(false);
         },
       });
@@ -154,7 +253,8 @@ export function VectorManagement() {
     try {
       await deleteDataset(datasetName);
       setSuccess(`Deleted dataset: ${datasetName}`);
-      loadDatasets();
+      await loadDatasets();
+      dispatchDatasetCatalogChanged({ reason: "deleted", datasetName });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -193,6 +293,44 @@ export function VectorManagement() {
   };
 
   // Backfill documents to Elasticsearch
+  const backfillDataset = async (targetDataset: string): Promise<BackfillResponse> => {
+    const selectedProfile = datasets.find((d) => d.name === targetDataset);
+    const resolvedShardCount = selectedProfile?.shard_count || 1;
+    const resolvedStrategy = selectedProfile?.sharding_strategy || 'NONE';
+    const resolvedDims = selectedProfile?.dims || 768;
+    const resolvedShardPath = selectedProfile?.shard_path;
+    const resolvedDatasetName = selectedProfile?.dataset_name;
+    const resolvedUriPrefix = selectedProfile?.uri_prefix;
+
+    const res = await fetch("/api/vectors/backfill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset: targetDataset,
+        dims: resolvedDims,
+        shardCount: resolvedShardCount,
+        shardingStrategy: resolvedStrategy,
+        shardPath: resolvedShardPath,
+        datasetName: resolvedDatasetName,
+        uriPrefix: resolvedUriPrefix,
+      }),
+    });
+
+    return await res.json();
+  };
+
+  const refreshLanceNrt = async (targetDataset: string): Promise<void> => {
+    try {
+      await fetch("/api/lance/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset: targetDataset }),
+      });
+    } catch {
+      // Keep append flow resilient even when refresh endpoint is unavailable.
+    }
+  };
+
   const handleBackfill = async (datasetName?: string) => {
     setIsBackfilling(true);
     setError(null);
@@ -205,15 +343,9 @@ export function VectorManagement() {
         return;
       }
 
-      const res = await fetch("/api/vectors/backfill", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dataset: targetDataset }),
-      });
-
-      const data: BackfillResponse = await res.json();
-
+      const data = await backfillDataset(targetDataset);
       if (data.success) {
+        await refreshLanceNrt(targetDataset);
         setSuccess(data.message || `Backfilled ${data.indexedDocuments} documents to Elasticsearch in ${data.duration}`);
       } else {
         setError(data.error || "Backfill failed");
@@ -224,6 +356,107 @@ export function VectorManagement() {
       setIsBackfilling(false);
     }
   };
+
+  const handleAppend = async () => {
+    const targetDataset = selectedDataset;
+    if (!targetDataset) {
+      setError("Select a dataset before appending vectors");
+      return;
+    }
+
+    let targetShardId: number | undefined;
+    if (appendTargetShard !== 'auto') {
+      const parsed = Number.parseInt(appendTargetShard, 10);
+      if (Number.isFinite(parsed)) {
+        targetShardId = parsed;
+      }
+    }
+
+    setShowAppendModal(false);
+    setIsAppending(true);
+    setError(null);
+    setSuccess(null);
+    setAppendProgress(0);
+    setAppendStatus("");
+    setAppendProgressMessage("Preparing append job...");
+    const startedAtMs = Date.now();
+    setAppendEstimatedRemainingSec(null);
+
+    try {
+      const result = await appendDataset({
+        dataset: targetDataset,
+        vectors: appendVectors,
+        target_shard_id: targetShardId,
+      });
+
+      setAppendJobId(result.job_id);
+      setAppendStatus("running");
+
+      const cleanup = subscribeToJobProgress(result.job_id, {
+        onProgress: (prog, status, message) => {
+          setAppendProgress(prog);
+          setAppendStatus(status);
+          if (message) setAppendProgressMessage(message);
+          const remaining = estimateRemainingSeconds({
+            startedAtMs,
+            nowMs: Date.now(),
+            progressPercent: prog,
+          });
+          setAppendEstimatedRemainingSec(remaining);
+        },
+        onComplete: (data) => {
+          void (async () => {
+            const updatedDatasetName = data?.dataset_name || targetDataset;
+            const appended = Number(data?.appended_vectors || appendVectors);
+            setAppendProgress(100);
+            setAppendStatus("completed");
+            setAppendProgressMessage("Append completed. Syncing Elasticsearch index...");
+            setAppendEstimatedRemainingSec(0);
+            setIsBackfilling(true);
+
+            const backfillResponse = await backfillDataset(updatedDatasetName);
+            if (!backfillResponse.success) {
+              throw new Error(backfillResponse.error || "Backfill after append failed");
+            }
+            await refreshLanceNrt(updatedDatasetName);
+
+            await refreshDatasetsUntilVisible(updatedDatasetName);
+            selectDataset(updatedDatasetName);
+            dispatchDatasetCatalogChanged({
+              reason: "updated",
+              datasetName: updatedDatasetName,
+            });
+
+            setSuccess(
+              `Appended ${appended} vectors to ${updatedDatasetName} and synchronized Elasticsearch index`
+            );
+            setIsBackfilling(false);
+            setIsAppending(false);
+          })().catch((err: any) => {
+            setError(err.message || "Append completed but synchronization failed");
+            setIsBackfilling(false);
+            setIsAppending(false);
+          });
+        },
+        onError: (err) => {
+          setAppendStatus("failed");
+          setError(err);
+          setAppendEstimatedRemainingSec(null);
+          setIsAppending(false);
+        },
+      });
+
+      return cleanup;
+    } catch (err: any) {
+      setError(err.message);
+      setIsAppending(false);
+    }
+  };
+
+  const selectedDatasetProfile = selectedDataset
+    ? datasets.find((dataset) => dataset.name === selectedDataset)
+    : undefined;
+  const selectedDatasetShardCount = selectedDatasetProfile?.shard_count || 1;
 
   return (
     <section id="vector-management" className="py-20 relative">
@@ -272,6 +505,14 @@ export function VectorManagement() {
             <Plus className="w-4 h-4" />
             {isGenerating ? 'Generating...' : 'Generate Dataset'}
           </button>
+          <button
+            onClick={() => setShowAppendModal(true)}
+            disabled={isAppending || !selectedDataset}
+            className="px-6 py-3 bg-accent/20 hover:bg-accent/30 disabled:bg-gray-700 text-white rounded-lg transition-all flex items-center gap-2 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-4 h-4" />
+            {isAppending ? 'Appending...' : 'Append Vectors'}
+          </button>
           {datasets.length > 0 && selectedDataset && (
             <>
               <button
@@ -305,7 +546,13 @@ export function VectorManagement() {
               <Upload className="w-5 h-5 text-primary animate-bounce" />
               <div className="flex-1">
                 <p className="text-white font-semibold">Generating Dataset...</p>
-                <p className="text-gray-400 text-sm">{jobStatus} • {progress.toFixed(0)}%</p>
+                <p className="text-gray-400 text-sm">{jobStatus} • {progress.toFixed(1)}%</p>
+                <p className="text-gray-500 text-xs mt-1">
+                  ETA: {formatRemainingTime(estimatedRemainingSec)}
+                </p>
+                {progressMessage && (
+                  <p className="text-gray-500 text-xs mt-1">{progressMessage}</p>
+                )}
               </div>
             </div>
             <div className="h-2 bg-black/50 rounded-full overflow-hidden">
@@ -314,6 +561,40 @@ export function VectorManagement() {
                 animate={{ width: `${progress}%` }}
                 transition={{ duration: 0.3 }}
                 className="h-full bg-gradient-to-r from-primary to-accent"
+              />
+            </div>
+          </motion.div>
+        )}
+
+        {/* Append Progress */}
+        {isAppending && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-md mx-auto mb-8 p-6 rounded-lg bg-accent/10 border border-accent/30"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <Plus className="w-5 h-5 text-accent animate-pulse" />
+              <div className="flex-1">
+                <p className="text-white font-semibold">Appending Vectors...</p>
+                <p className="text-gray-400 text-sm">{appendStatus} • {appendProgress.toFixed(1)}%</p>
+                <p className="text-gray-500 text-xs mt-1">
+                  ETA: {formatRemainingTime(appendEstimatedRemainingSec)}
+                </p>
+                {appendProgressMessage && (
+                  <p className="text-gray-500 text-xs mt-1">{appendProgressMessage}</p>
+                )}
+                {appendJobId && (
+                  <p className="text-gray-600 text-xs mt-1 font-mono">job: {appendJobId}</p>
+                )}
+              </div>
+            </div>
+            <div className="h-2 bg-black/50 rounded-full overflow-hidden">
+              <motion.div
+                initial={{ width: 0 }}
+                animate={{ width: `${appendProgress}%` }}
+                transition={{ duration: 0.25 }}
+                className="h-full bg-gradient-to-r from-accent to-primary"
               />
             </div>
           </motion.div>
@@ -392,7 +673,7 @@ export function VectorManagement() {
                         ? 'ring-2 ring-primary border-primary/50'
                         : 'hover:border-gray-600'
                     }`}
-                    onClick={() => setSelectedDataset(dataset.name)}
+                    onClick={() => selectDataset(dataset.name)}
                   >
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-4">
@@ -412,6 +693,7 @@ export function VectorManagement() {
                           </div>
                           <p className="text-gray-400 text-sm">
                             {dataset.vectors} vectors • {dataset.dims} dims • {dataset.size}
+                            {` • shards=${dataset.shard_count || 1} • ${dataset.sharding_strategy || 'NONE'}`}
                           </p>
                         </div>
                       </div>
@@ -420,7 +702,7 @@ export function VectorManagement() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelectedDataset(dataset.name);
+                              selectDataset(dataset.name);
                             }}
                             className="px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary rounded-lg transition-colors flex items-center gap-2"
                           >
@@ -489,7 +771,7 @@ export function VectorManagement() {
                 exit={{ scale: 0.95, y: 20 }}
                 className="max-w-4xl mx-auto my-8 relative z-[101]"
               >
-                <div className="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden shadow-2xl">
+                <div className="modal-panel rounded-lg overflow-hidden shadow-2xl">
                   {/* Header */}
                   <div className="flex items-center justify-between p-6 border-b border-gray-700">
                     <div>
@@ -558,7 +840,7 @@ export function VectorManagement() {
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              className="bg-gray-900 border border-gray-700 rounded-lg p-8 max-w-md w-full"
+              className="modal-panel rounded-lg p-8 max-w-md w-full"
             >
               <h3 className="text-2xl font-bold text-white mb-6">Generate New Dataset</h3>
 
@@ -571,7 +853,7 @@ export function VectorManagement() {
                     max={10000}
                     value={vectors}
                     onChange={(e) => setVectors(Math.min(10000, Math.max(1, parseInt(e.target.value) || 10)))}
-                    className="w-full bg-black/50 border border-gray-600 rounded px-4 py-3 text-white font-mono focus:outline-none focus:border-primary"
+                    className="modal-input w-full rounded px-4 py-3 font-mono"
                   />
                 </div>
 
@@ -583,9 +865,36 @@ export function VectorManagement() {
                     max={4096}
                     value={dims}
                     onChange={(e) => setDims(Math.min(4096, Math.max(64, parseInt(e.target.value) || 768)))}
-                    className="w-full bg-black/50 border border-gray-600 rounded px-4 py-3 text-white font-mono focus:outline-none focus:border-primary"
+                    className="modal-input w-full rounded px-4 py-3 font-mono"
                   />
                   <p className="text-xs text-gray-500 mt-2">Common: 768 (Jina v2), 1536 (OpenAI)</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-300 mb-2">分片数 (Shard Count)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={32}
+                    value={shardCount}
+                    onChange={(e) => setShardCount(Math.min(32, Math.max(1, parseInt(e.target.value, 10) || 1)))}
+                    className="modal-input w-full rounded px-4 py-3 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-300 mb-2">分片算法 (Sharding Strategy)</label>
+                  <select
+                    value={shardingStrategy}
+                    onChange={(e) => setShardingStrategy((e.target.value === 'ES_ROUTING' ? 'ES_ROUTING' : 'NONE'))}
+                    className="modal-input w-full rounded px-4 py-3"
+                  >
+                    <option value="NONE">NONE</option>
+                    <option value="ES_ROUTING">ES_ROUTING</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-2">
+                    建议: 默认使用 NONE；数据布局与 ES 路由一致时再选择 ES_ROUTING。
+                  </p>
                 </div>
 
                 <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4">
@@ -610,6 +919,86 @@ export function VectorManagement() {
                 </button>
                 <button
                   onClick={() => setShowGenerateModal(false)}
+                  className="flex-1 px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Append Modal */}
+        {showAppendModal && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="modal-panel rounded-lg p-8 max-w-md w-full"
+            >
+              <h3 className="text-2xl font-bold text-white mb-2">Append Vectors</h3>
+              <p className="text-sm text-gray-400 mb-6">
+                Add new vectors/documents to an existing dataset and synchronize Elasticsearch.
+              </p>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-mono text-gray-300 mb-2">Target Dataset</label>
+                  <div className="modal-input w-full rounded px-4 py-3 font-mono text-sm text-white">
+                    {selectedDataset || "No dataset selected"}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-mono text-gray-300 mb-2">Vectors to Append</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5000}
+                    value={appendVectors}
+                    onChange={(e) => setAppendVectors(Math.min(5000, Math.max(1, parseInt(e.target.value, 10) || 1)))}
+                    className="modal-input w-full rounded px-4 py-3 font-mono"
+                  />
+                </div>
+
+                {selectedDatasetShardCount > 1 && (
+                  <div>
+                    <label className="block text-sm font-mono text-gray-300 mb-2">Target Shard</label>
+                    <select
+                      value={appendTargetShard}
+                      onChange={(e) => setAppendTargetShard(e.target.value)}
+                      className="modal-input w-full rounded px-4 py-3"
+                    >
+                      <option value="auto">Auto by strategy</option>
+                      {Array.from({ length: selectedDatasetShardCount }).map((_, shardId) => (
+                        <option key={`append-shard-${shardId}`} value={String(shardId)}>
+                          shard-{shardId}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-2">
+                      For ES_ROUTING datasets, explicit shard append will generate IDs aligned to the selected shard.
+                    </p>
+                  </div>
+                )}
+
+                <div className="bg-accent/10 border border-accent/20 rounded-lg p-4">
+                  <p className="text-accent-light text-sm">
+                    <strong>Flow:</strong> append in OSS → rebuild ES metadata index → refresh for search visibility.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-4 mt-8">
+                <button
+                  onClick={handleAppend}
+                  disabled={!selectedDataset || isAppending}
+                  className="flex-1 px-6 py-3 bg-accent hover:bg-accent/80 text-white rounded-lg transition-colors font-semibold disabled:opacity-50"
+                >
+                  Start Append
+                </button>
+                <button
+                  onClick={() => setShowAppendModal(false)}
                   className="flex-1 px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
                 >
                   Cancel

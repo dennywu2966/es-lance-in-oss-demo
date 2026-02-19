@@ -8,6 +8,7 @@ import oss2
 from config import load_oss_config
 from typing import List, Dict, Optional
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,17 @@ class OSSService:
             if not result.object_list:
                 return []
 
+            meta_keys = {}
+
             for obj in result.object_list:
                 # Parse dataset name from path: datasets/{dataset_name}/...
                 parts = obj.key.split('/')
                 if len(parts) >= 2 and parts[0] == 'datasets':
                     dataset_name = parts[1]
+
+                    # Track metadata object path for profile enrichment
+                    if obj.key.endswith('/dataset.meta.json'):
+                        meta_keys[dataset_name] = obj.key
 
                     # Parse metadata from filename: vectors-{N}-dims-{D}-{timestamp}
                     if dataset_name not in datasets:
@@ -81,6 +88,8 @@ class OSSService:
                                 'name': dataset_name,
                                 'vectors': vectors,
                                 'dims': dims,
+                                'shard_count': 1,
+                                'sharding_strategy': 'NONE',
                                 'size_bytes': obj.size,
                                 'size': self._format_bytes(obj.size),
                                 'last_modified': last_modified,
@@ -91,6 +100,8 @@ class OSSService:
                                 'name': dataset_name,
                                 'vectors': 0,
                                 'dims': 0,
+                                'shard_count': 1,
+                                'sharding_strategy': 'NONE',
                                 'size_bytes': obj.size,
                                 'size': self._format_bytes(obj.size),
                                 'last_modified': last_modified,
@@ -102,6 +113,38 @@ class OSSService:
                         datasets[dataset_name]['size'] = self._format_bytes(
                             datasets[dataset_name]['size_bytes']
                         )
+
+            # Enrich datasets with explicit metadata profile when available
+            for dataset_name, meta_key in meta_keys.items():
+                try:
+                    meta_obj = self.bucket.get_object(meta_key)
+                    raw = meta_obj.read()
+                    if isinstance(raw, bytes):
+                        raw = raw.decode('utf-8')
+                    profile = json.loads(raw)
+
+                    dataset = datasets.get(dataset_name)
+                    if dataset:
+                        dataset['shard_count'] = int(profile.get('shard_count', dataset.get('shard_count', 1)))
+                        strategy_raw = str(profile.get('sharding_strategy', dataset.get('sharding_strategy', 'NONE'))).upper()
+                        dataset['sharding_strategy'] = 'ES_ROUTING' if strategy_raw == 'ES_ROUTING' else 'NONE'
+
+                        vectors_value = profile.get('vectors')
+                        if isinstance(vectors_value, (int, float)) and vectors_value > 0:
+                            dataset['vectors'] = int(vectors_value)
+
+                        dims_value = profile.get('dims')
+                        if isinstance(dims_value, (int, float)) and dims_value > 0:
+                            dataset['dims'] = int(dims_value)
+
+                        if 'shard_path' in profile:
+                            dataset['shard_path'] = profile.get('shard_path')
+                        if 'dataset_name' in profile:
+                            dataset['dataset_name'] = profile.get('dataset_name')
+                        if 'uri_prefix' in profile:
+                            dataset['uri_prefix'] = profile.get('uri_prefix')
+                except Exception as e:
+                    logger.warning(f"Failed to parse metadata for dataset {dataset_name}: {e}")
 
             return sorted(
                 list(datasets.values()),
@@ -139,7 +182,7 @@ class OSSService:
             logger.error(f"Failed to delete dataset {dataset_name}: {e}")
             raise
 
-    def upload_dataset(self, local_path: str, dataset_name: str) -> Dict[str, str]:
+    def upload_dataset(self, local_path: str, dataset_name: str, metadata: Optional[Dict] = None) -> Dict[str, str]:
         """
         Upload a Lance dataset from local path to OSS.
 
@@ -169,6 +212,14 @@ class OSSService:
                     file_size = os.path.getsize(local_file)
                     total_size += file_size
                     logger.info(f"Uploaded {oss_key} ({self._format_bytes(file_size)})")
+
+            # Persist dataset profile metadata as a sidecar object
+            if metadata is not None:
+                meta_key = f'datasets/{dataset_name}/dataset.meta.json'
+                meta_payload = json.dumps(metadata, ensure_ascii=False, indent=2)
+                self.bucket.put_object(meta_key, meta_payload.encode('utf-8'))
+                uploaded_files.append(meta_key)
+                logger.info(f"Uploaded dataset metadata: {meta_key}")
 
             return {
                 'dataset_name': dataset_name,
